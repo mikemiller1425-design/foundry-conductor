@@ -253,11 +253,23 @@ def _invoke(
     executable = resolve_binary(agent)
     if executable is None:
         raise ConductorError(f"{agent} binary is missing")
-    write_once(prefix.with_suffix(".prompt.txt"), prompt.encode() + b"\n")
+    effective_prompt = prompt
+    if agent == "cursor":
+        effective_prompt = f"""{prompt}
+
+Cursor CLI does not receive an out-of-band output schema. Therefore the exact
+required schema is included here. Return one JSON object matching it, with no
+analysis preamble, Markdown fence, or trailing commentary.
+
+<required-json-schema>
+{schema_path.read_text(encoding='utf-8')}
+</required-json-schema>
+"""
+    write_once(prefix.with_suffix(".prompt.txt"), effective_prompt.encode() + b"\n")
     command = build_agent_command(
         agent,
         snapshot=snapshot,
-        prompt=prompt,
+        prompt=effective_prompt,
         response_schema=schema_path,
         max_turns=max_turns,
     )
@@ -265,7 +277,7 @@ def _invoke(
         prefix.with_suffix(".command.json"),
         json.dumps(redact_command(command), indent=2, sort_keys=True).encode() + b"\n",
     )
-    prompt_hash = sha256_bytes(prompt.encode())
+    prompt_hash = sha256_bytes(effective_prompt.encode())
     log.append("agent_started", agent=agent, artifact=prefix.name, promptSha256=prompt_hash)
     started = time.monotonic()
     completed = run_command(

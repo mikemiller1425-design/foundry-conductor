@@ -10,6 +10,7 @@ from unittest.mock import patch
 
 from foundry_conductor.core import ConductorError, fingerprint_repo
 from foundry_conductor.reconcile import (
+    _invoke,
     author_prompt,
     run_reconciliation,
     validate_reconciliation_task,
@@ -246,6 +247,48 @@ class ReconciliationTests(unittest.TestCase):
             self.assertEqual("ready_for_operator_decision", result["status"])
             self.assertEqual(2, invoked.call_count)
             self.assertEqual(seed_id, result["seedRunId"])
+
+    def test_cursor_invocation_records_and_sends_schema(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            snapshot = self.make_repo(root)
+            schema = root / "review-schema.json"
+            schema.write_text(json.dumps({"type": "object", "required": ["verdict"]}), encoding="utf-8")
+            prefix = root / "evidence" / "review-cursor"
+            completed = subprocess.CompletedProcess(
+                args=[],
+                returncode=0,
+                stdout=json.dumps(
+                    {
+                        "verdict": "pass",
+                        "draftSha256": "a" * 64,
+                        "summary": "pass",
+                        "findings": [],
+                        "requiresHuman": False,
+                    }
+                ).encode(),
+                stderr=b"",
+            )
+            from foundry_conductor.core import AppendOnlyLog
+
+            log = AppendOnlyLog(root / "events.jsonl")
+            with patch("foundry_conductor.reconcile.resolve_binary", return_value="cursor-agent"), patch(
+                "foundry_conductor.reconcile.run_command", return_value=completed
+            ):
+                _invoke(
+                    agent="cursor",
+                    snapshot=snapshot,
+                    prompt="review this",
+                    schema_path=schema,
+                    validator=validate_review_response,
+                    prefix=prefix,
+                    timeout_seconds=30,
+                    max_turns=5,
+                    log=log,
+                )
+            recorded = prefix.with_suffix(".prompt.txt").read_text(encoding="utf-8")
+            self.assertIn("required-json-schema", recorded)
+            self.assertIn('"verdict"', recorded)
 
 
 if __name__ == "__main__":
