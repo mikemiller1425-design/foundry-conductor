@@ -54,6 +54,7 @@ source-before.json    Foundry baseline fingerprint
 source-after.json     post-run Foundry fingerprint
 snapshot/             disposable tracked-file export
 responses/            immutable stdout/stderr records for live runs
+                      plus schema-validated normalized JSON on success
 summary.json          final machine-readable result
 ```
 

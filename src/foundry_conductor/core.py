@@ -58,6 +58,14 @@ def resolve_binary(agent: str) -> str | None:
         candidate = Path.home() / ".local" / "bin" / "cursor-agent"
         if candidate.is_file() and os.access(candidate, os.X_OK):
             return str(candidate)
+    if agent == "codex":
+        candidates = [
+            Path("/Applications/ChatGPT.app/Contents/Resources/codex"),
+            Path("/Applications/Codex.app/Contents/Resources/codex"),
+        ]
+        for candidate in candidates:
+            if candidate.is_file() and os.access(candidate, os.X_OK):
+                return str(candidate)
     return None
 
 
@@ -265,7 +273,11 @@ def build_agent_command(
             prompt,
         ]
     elif agent == "claude":
-        schema = response_schema.read_text(encoding="utf-8")
+        schema_value = load_json(response_schema)
+        # Claude Code validates the schema body but currently rejects the
+        # draft-2020-12 metadata URI itself. The constraint body is unchanged.
+        schema_value.pop("$schema", None)
+        schema = json.dumps(schema_value, separators=(",", ":"))
         argv = [
             executable,
             "-p",
@@ -276,7 +288,7 @@ def build_agent_command(
             "--tools",
             "Read,Glob,Grep",
             "--max-turns",
-            "2",
+            "5",
             "--no-session-persistence",
             "--json-schema",
             schema,
@@ -298,6 +310,85 @@ def build_agent_command(
             prompt,
         ]
     return AgentCommand(name=agent, executable=executable, argv=argv)
+
+
+def validate_agent_result(value: Any) -> dict[str, Any]:
+    if not isinstance(value, dict):
+        raise ConductorError("agent result is not an object")
+    required = {"status", "summary", "findings", "requiresHuman"}
+    if set(value) != required:
+        raise ConductorError("agent result fields do not match the response schema")
+    if value["status"] not in {"pass", "fail", "blocked"}:
+        raise ConductorError("agent result has an invalid status")
+    if not isinstance(value["summary"], str) or not value["summary"]:
+        raise ConductorError("agent result summary must be a non-empty string")
+    if not isinstance(value["requiresHuman"], bool):
+        raise ConductorError("agent result requiresHuman must be boolean")
+    if not isinstance(value["findings"], list):
+        raise ConductorError("agent result findings must be an array")
+    for finding in value["findings"]:
+        if not isinstance(finding, dict) or set(finding) != {"severity", "message"}:
+            raise ConductorError("agent finding fields do not match the response schema")
+        if finding["severity"] not in {"info", "warning", "error"}:
+            raise ConductorError("agent finding has an invalid severity")
+        if not isinstance(finding["message"], str) or not finding["message"]:
+            raise ConductorError("agent finding message must be a non-empty string")
+    return value
+
+
+def _json_values_from_text(text: str) -> Iterable[Any]:
+    stripped = text.strip()
+    if not stripped:
+        return
+    try:
+        yield json.loads(stripped)
+    except json.JSONDecodeError:
+        pass
+    decoder = json.JSONDecoder()
+    for match in re.finditer(r"[\{\[]", text):
+        try:
+            value, _ = decoder.raw_decode(text[match.start() :])
+            yield value
+        except json.JSONDecodeError:
+            continue
+    for match in re.finditer(r"```(?:json)?\s*(.*?)```", text, flags=re.DOTALL | re.IGNORECASE):
+        try:
+            yield json.loads(match.group(1).strip())
+        except json.JSONDecodeError:
+            continue
+
+
+def _result_candidates(value: Any) -> Iterable[Any]:
+    if isinstance(value, dict):
+        if {"status", "summary", "findings", "requiresHuman"}.issubset(value):
+            yield value
+        for key in ("structured_output", "result", "content", "text", "message", "item"):
+            if key in value:
+                yield from _result_candidates(value[key])
+    elif isinstance(value, list):
+        for item in value:
+            yield from _result_candidates(item)
+    elif isinstance(value, str):
+        for decoded in _json_values_from_text(value):
+            yield from _result_candidates(decoded)
+
+
+def parse_agent_result(stdout: bytes) -> dict[str, Any]:
+    text = stdout.decode("utf-8", errors="replace")
+    documents = list(_json_values_from_text(text))
+    if not documents:
+        for line in text.splitlines():
+            try:
+                documents.append(json.loads(line))
+            except json.JSONDecodeError:
+                continue
+    for document in reversed(documents):
+        for candidate in _result_candidates(document):
+            try:
+                return validate_agent_result(candidate)
+            except ConductorError:
+                continue
+    raise ConductorError("no schema-valid agent result found in stdout")
 
 
 def redact_command(command: AgentCommand) -> dict[str, Any]:
@@ -448,16 +539,39 @@ def execute_task(
             write_once(response_path, completed.stdout)
             write_once(error_path, completed.stderr)
             clean = snapshot_is_clean(snapshot)
-            status = "pass" if completed.returncode == 0 and clean else "fail"
+            response_valid = False
+            response_error: str | None = None
+            normalized: dict[str, Any] | None = None
+            if completed.returncode == 0:
+                try:
+                    normalized = parse_agent_result(completed.stdout)
+                    response_valid = True
+                    write_once(
+                        run_dir / "responses" / f"{command.name}.normalized.json",
+                        json.dumps(normalized, indent=2, sort_keys=True).encode() + b"\n",
+                    )
+                except ConductorError as exc:
+                    response_error = str(exc)
+            if not clean or completed.returncode != 0 or not response_valid:
+                status = "fail"
+            else:
+                status = normalized["status"]
             result = {
                 "agent": command.name,
                 "status": status,
                 "exitCode": completed.returncode,
                 "snapshotClean": clean,
+                "responseValid": response_valid,
                 "durationMs": duration_ms,
                 "stdoutSha256": sha256_bytes(completed.stdout),
                 "stderrSha256": sha256_bytes(completed.stderr),
             }
+            if normalized is not None:
+                result["agentResultStatus"] = normalized["status"]
+                result["agentSummary"] = normalized["summary"]
+                result["requiresHuman"] = normalized["requiresHuman"]
+            if response_error is not None:
+                result["responseError"] = response_error
             results.append(result)
             log.append("agent_finished", **result)
             if not clean:
