@@ -1,0 +1,18 @@
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "foundry-conductor"
+version = "0.1.0"
+description = "Policy-gated local orchestration for Foundry coding agents"
+requires-python = ">=3.11"
+
+[project.scripts]
+foundryctl = "foundry_conductor.cli:main"
+
+[tool.setuptools]
+package-dir = {"" = "src"}
+
+[tool.setuptools.packages.find]
+where = ["src"]

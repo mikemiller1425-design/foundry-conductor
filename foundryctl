@@ -1,0 +1,6 @@
+#!/bin/sh
+set -eu
+
+tool_root=$(CDPATH= cd -- "$(dirname -- "$0")" && pwd)
+export PYTHONPATH="$tool_root/src${PYTHONPATH:+:$PYTHONPATH}"
+exec python3 -m foundry_conductor.cli "$@"

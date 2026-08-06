@@ -1,0 +1,21 @@
+{
+  "schemaVersion": 1,
+  "id": "readonly-triad-smoke",
+  "mode": "read_only",
+  "sourceRepository": "/Users/macmini/Documents/GitHub/Foundry",
+  "expectedBranch": "main",
+  "expectedHead": "c1607ad3068504438281f3e667d7fef4c9cc2db2",
+  "permissions": {
+    "repositoryWrite": false,
+    "nasAccess": false,
+    "push": false,
+    "liveModelCalls": true
+  },
+  "agents": [
+    "claude",
+    "cursor",
+    "codex"
+  ],
+  "timeoutSeconds": 180,
+  "prompt": "This is a read-only conductor connectivity probe against a disposable tracked-file snapshot. Do not edit, create, delete, stage, commit, push, access /Volumes, invoke another model, or perform external actions. Inspect only enough of the current snapshot to identify the repository name. Return only an object matching the supplied result schema. Use status pass if the snapshot is readable, otherwise blocked. State that no implementation was attempted."
+}
