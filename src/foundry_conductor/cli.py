@@ -69,6 +69,11 @@ def build_parser() -> argparse.ArgumentParser:
         help="continue from the last completed reviewed round in an earlier append-only run",
     )
     reconcile_parser.add_argument(
+        "--allow-one-additional-round",
+        action="store_true",
+        help="with --resume-reviewed-from, permit exactly one explicitly authorized round beyond maxRounds",
+    )
+    reconcile_parser.add_argument(
         "--resume-partial-from",
         metavar="RUN_ID",
         help="continue an incomplete round from its preserved draft and valid reviews",
@@ -100,6 +105,7 @@ def main(argv: list[str] | None = None) -> int:
                 seed_run_id=args.resume_draft_from,
                 reviewed_run_id=args.resume_reviewed_from,
                 partial_run_id=args.resume_partial_from,
+                allow_one_additional_round=args.allow_one_additional_round,
             )
             print(json.dumps(result, indent=2, sort_keys=True))
             return 0 if result["status"] in {"planned", "ready_for_operator_decision"} else 3

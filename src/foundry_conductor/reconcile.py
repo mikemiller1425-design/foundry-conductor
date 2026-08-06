@@ -207,15 +207,17 @@ def reviewer_prompt(
     round_number: int,
     draft: str,
     draft_sha256: str,
+    round_limit: int | None = None,
 ) -> str:
     focus = task["reviewerFocus"][reviewer]
+    effective_round_limit = task["maxRounds"] if round_limit is None else round_limit
     return f"""You are the {reviewer} independent reviewer in a bounded,
 read-only reconciliation workflow. Work only in the disposable tracked-file
 snapshot. Do not edit, create, delete, stage, commit, push, access /Volumes,
 invoke another model, perform external actions, or begin implementation.
 
 Accepted Foundry baseline: {task['expectedHead']}
-Round: {round_number} of {task['maxRounds']}
+Round: {round_number} of {effective_round_limit}
 Candidate SHA-256: {draft_sha256}
 
 Read and enforce these authoritative tracked sources:
@@ -322,6 +324,7 @@ def run_reconciliation(
     seed_run_id: str | None = None,
     reviewed_run_id: str | None = None,
     partial_run_id: str | None = None,
+    allow_one_additional_round: bool = False,
 ) -> dict[str, Any]:
     task = load_json(task_path)
     validate_reconciliation_task(task)
@@ -329,6 +332,8 @@ def run_reconciliation(
         raise ConductorError("live reconciliation requires --confirm-live-models")
     if sum(value is not None for value in (seed_run_id, reviewed_run_id, partial_run_id)) > 1:
         raise ConductorError("choose only one resume source")
+    if allow_one_additional_round and reviewed_run_id is None:
+        raise ConductorError("--allow-one-additional-round requires --resume-reviewed-from")
 
     source_repo = Path(task["sourceRepository"]).expanduser().resolve()
     before = fingerprint_repo(source_repo)
@@ -363,6 +368,7 @@ def run_reconciliation(
     partial_manifest: dict[str, Any] | None = None
     partial_state: dict[str, Any] | None = None
     start_round = 1
+    effective_max_rounds = task["maxRounds"]
 
     if seed_run_id is not None:
         if not re.fullmatch(r"[0-9]{8}T[0-9]{6}Z-[a-z0-9-]+-[0-9a-f]{8}", seed_run_id):
@@ -411,8 +417,16 @@ def run_reconciliation(
             raise ConductorError("reviewed run has no completed review round")
         last_record = completed_rounds[-1]
         last_round = last_record.get("round")
-        if not isinstance(last_round, int) or not 1 <= last_round < task["maxRounds"]:
+        normal_resume = isinstance(last_round, int) and 1 <= last_round < task["maxRounds"]
+        authorized_extra_resume = (
+            allow_one_additional_round
+            and isinstance(last_round, int)
+            and last_round == task["maxRounds"]
+        )
+        if not normal_resume and not authorized_extra_resume:
             raise ConductorError("reviewed run has no resumable round")
+        if authorized_extra_resume:
+            effective_max_rounds = task["maxRounds"] + 1
         reviewed_round_dir = reviewed_dir / f"round-{last_round:02d}"
         prior_draft = (reviewed_round_dir / "candidate.md").read_text(encoding="utf-8")
         draft_hash = sha256_bytes(prior_draft.encode())
@@ -446,6 +460,8 @@ def run_reconciliation(
                 )
                 for reviewer in task["reviewers"]
             },
+            "authorizedAdditionalRound": authorized_extra_resume,
+            "effectiveMaxRounds": effective_max_rounds,
         }
         write_once(run_dir / "resume.json", json.dumps(resume_manifest, indent=2, sort_keys=True).encode() + b"\n")
         summary["resume"] = resume_manifest
@@ -537,7 +553,7 @@ def run_reconciliation(
             )
             log.append("reconciliation_planned", maxRounds=task["maxRounds"])
         else:
-            for round_number in range(start_round, task["maxRounds"] + 1):
+            for round_number in range(start_round, effective_max_rounds + 1):
                 round_dir = run_dir / f"round-{round_number:02d}"
                 if partial_state is not None and round_number == partial_state["round"]:
                     author = partial_state["author"]
@@ -602,6 +618,7 @@ def run_reconciliation(
                                 round_number=round_number,
                                 draft=draft,
                                 draft_sha256=draft_hash,
+                                round_limit=effective_max_rounds,
                             ),
                             schema_path=review_schema,
                             validator=validate_review_response,
@@ -672,7 +689,7 @@ def run_reconciliation(
                     for finding in review["findings"]
                 ]
                 prior_draft = draft
-                if round_number == task["maxRounds"]:
+                if round_number == effective_max_rounds:
                     summary["status"] = "blocked_max_rounds"
                     summary["remainingFindings"] = feedback
                     log.append("reconciliation_stopped", reason="max_rounds")

@@ -50,6 +50,10 @@ cd /Users/macmini/Documents/GitHub/foundry-conductor
 # Continue from an already-preserved Claude draft without regenerating it.
 ./foundryctl reconcile --live --confirm-live-models \
   --resume-draft-from <prior-run-id>
+
+# Only after a separate operator authorization for one extra bounded round.
+./foundryctl reconcile --live --confirm-live-models \
+  --resume-reviewed-from <prior-run-id> --allow-one-additional-round
 ```
 
 Run evidence is stored under `runs/<run-id>/`:

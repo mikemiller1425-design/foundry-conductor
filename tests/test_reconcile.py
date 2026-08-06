@@ -453,6 +453,90 @@ class ReconciliationTests(unittest.TestCase):
                 call.kwargs["agent"] for call in invoked.call_args_list
             ])
 
+    def test_explicitly_authorized_single_round_can_resume_at_hard_cap(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            repo = self.make_repo(root)
+            task = self.make_task(repo)
+            task_path = self.write_task(root, task)
+            reviewed_id = "20260101T000000Z-test-reconciliation-abcdef12"
+            reviewed_dir = root / "runs" / reviewed_id
+            round_dir = reviewed_dir / "round-03"
+            round_dir.mkdir(parents=True)
+            (reviewed_dir / "task.json").write_text(json.dumps(task), encoding="utf-8")
+            draft_one = "third-round draft\n"
+            draft_one_hash = digest(draft_one)
+            rounds = [{"round": number} for number in (1, 2)] + [{
+                "round": 3,
+                "draftSha256": draft_one_hash,
+            }]
+            (reviewed_dir / "summary.json").write_text(json.dumps({
+                "sourceUnchanged": True,
+                "snapshotClean": True,
+                "rounds": rounds,
+            }), encoding="utf-8")
+            (round_dir / "candidate.md").write_text(draft_one, encoding="utf-8")
+            revise = {
+                "verdict": "revise",
+                "draftSha256": draft_one_hash,
+                "summary": "revise",
+                "findings": [{
+                    "severity": "error",
+                    "category": "typed hashing truth",
+                    "message": "digest is unconstrained",
+                    "requiredChange": "constrain it",
+                }],
+                "requiresHuman": False,
+            }
+            for reviewer in ("codex", "cursor"):
+                (round_dir / f"review-{reviewer}.normalized.json").write_text(
+                    json.dumps(revise), encoding="utf-8"
+                )
+            revised = "fourth-round draft"
+            passing = {
+                "verdict": "pass",
+                "draftSha256": digest(revised),
+                "summary": "pass",
+                "findings": [],
+                "requiresHuman": False,
+            }
+            responses = [
+                {"status": "drafted", "draft": revised, "notes": [], "requiresHuman": False},
+                passing,
+                passing,
+            ]
+            with patch("foundry_conductor.reconcile._invoke", side_effect=responses) as invoked:
+                result = run_reconciliation(
+                    root=root,
+                    task_path=task_path,
+                    live=True,
+                    live_confirmed=True,
+                    reviewed_run_id=reviewed_id,
+                    allow_one_additional_round=True,
+                )
+            self.assertEqual("ready_for_operator_decision", result["status"])
+            self.assertEqual([1, 2, 3, 4], [entry["round"] for entry in result["rounds"]])
+            self.assertEqual(3, invoked.call_count)
+            self.assertTrue(result["resume"]["authorizedAdditionalRound"])
+            self.assertTrue(all(
+                "Round: 4 of 4" in call.kwargs["prompt"]
+                for call in invoked.call_args_list[1:]
+            ))
+
+    def test_additional_round_requires_reviewed_resume(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            repo = self.make_repo(root)
+            task_path = self.write_task(root, self.make_task(repo))
+            with self.assertRaisesRegex(ConductorError, "requires --resume-reviewed-from"):
+                run_reconciliation(
+                    root=root,
+                    task_path=task_path,
+                    live=True,
+                    live_confirmed=True,
+                    allow_one_additional_round=True,
+                )
+
     def test_cursor_invocation_records_and_sends_schema(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:
             root = Path(temporary)
