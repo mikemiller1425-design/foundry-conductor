@@ -120,6 +120,7 @@ class ReconciliationTests(unittest.TestCase):
             )
             self.assertIn("old draft", prompt)
             self.assertIn("tighten scope", prompt)
+            self.assertIn("requiresHuman", prompt)
 
     def test_two_round_reconciliation_requires_matching_pass_hashes(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:
@@ -200,6 +201,51 @@ class ReconciliationTests(unittest.TestCase):
                 )
             self.assertEqual("failed", result["status"])
             self.assertIn("wrong draft", result["error"])
+
+    def test_seeded_draft_skips_duplicate_author_call(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            repo = self.make_repo(root)
+            task = self.make_task(repo)
+            task_path = self.write_task(root, task)
+            seed_id = "20260101T000000Z-test-reconciliation-abcdef12"
+            seed_dir = root / "runs" / seed_id
+            (seed_dir / "round-01").mkdir(parents=True)
+            (seed_dir / "task.json").write_text(json.dumps(task), encoding="utf-8")
+            (seed_dir / "summary.json").write_text(
+                json.dumps({"sourceUnchanged": True, "snapshotClean": True}),
+                encoding="utf-8",
+            )
+            seeded_draft = "preserved draft"
+            (seed_dir / "round-01" / "author-claude.normalized.json").write_text(
+                json.dumps(
+                    {
+                        "status": "drafted",
+                        "draft": seeded_draft,
+                        "notes": ["review carefully"],
+                        "requiresHuman": True,
+                    }
+                ),
+                encoding="utf-8",
+            )
+            passing = {
+                "verdict": "pass",
+                "draftSha256": digest(seeded_draft),
+                "summary": "pass",
+                "findings": [],
+                "requiresHuman": False,
+            }
+            with patch("foundry_conductor.reconcile._invoke", side_effect=[passing, passing]) as invoked:
+                result = run_reconciliation(
+                    root=root,
+                    task_path=task_path,
+                    live=True,
+                    live_confirmed=True,
+                    seed_run_id=seed_id,
+                )
+            self.assertEqual("ready_for_operator_decision", result["status"])
+            self.assertEqual(2, invoked.call_count)
+            self.assertEqual(seed_id, result["seedRunId"])
 
 
 if __name__ == "__main__":

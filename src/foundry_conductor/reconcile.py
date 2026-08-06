@@ -170,8 +170,10 @@ no real-root verification claim, and stop before Package 2b or downstream work.
 
 Return only the structured response required by the supplied schema. Put the
 entire authorization prompt in `draft`. Set `status` to `drafted` unless an
-authoritative contradiction makes drafting impossible. Do not ask the operator
-to decide matters already settled by the Package 2 record.
+authoritative contradiction makes drafting impossible. Set `requiresHuman` to
+true only when an unresolved operator decision prevents reviewer evaluation;
+do not use it merely to flag a derived requirement for careful review. Do not
+ask the operator to decide matters already settled by the Package 2 record.
 """
     if round_number == 1:
         return common
@@ -302,6 +304,7 @@ def run_reconciliation(
     task_path: Path,
     live: bool,
     live_confirmed: bool,
+    seed_run_id: str | None = None,
 ) -> dict[str, Any]:
     task = load_json(task_path)
     validate_reconciliation_task(task)
@@ -336,6 +339,37 @@ def run_reconciliation(
     review_schema = root / "schemas" / "review-result.schema.json"
     prior_draft: str | None = None
     feedback: list[dict[str, Any]] = []
+    seed_manifest: dict[str, Any] | None = None
+
+    if seed_run_id is not None:
+        if not re.fullmatch(r"[0-9]{8}T[0-9]{6}Z-[a-z0-9-]+-[0-9a-f]{8}", seed_run_id):
+            raise ConductorError("seed run id is invalid")
+        seed_dir = (root / "runs" / seed_run_id).resolve()
+        if seed_dir.parent != (root / "runs").resolve() or not seed_dir.is_dir():
+            raise ConductorError(f"seed run does not exist: {seed_run_id}")
+        seed_task = load_json(seed_dir / "task.json")
+        seed_summary = load_json(seed_dir / "summary.json")
+        if seed_task.get("expectedHead") != task["expectedHead"]:
+            raise ConductorError("seed run used a different Foundry baseline")
+        if seed_summary.get("sourceUnchanged") is not True or seed_summary.get("snapshotClean") is not True:
+            raise ConductorError("seed run did not preserve its source and snapshot boundaries")
+        seed_response_path = seed_dir / "round-01" / "author-claude.normalized.json"
+        seed_response = validate_draft_response(load_json(seed_response_path))
+        if seed_response["status"] != "drafted":
+            raise ConductorError("seed run did not produce a completed draft")
+        prior_draft = seed_response["draft"].strip() + "\n"
+        seed_manifest = {
+            "seedRunId": seed_run_id,
+            "draftSha256": sha256_bytes(prior_draft.encode()),
+            "authorRequiresHuman": seed_response["requiresHuman"],
+            "normalizedResponseSha256": sha256_bytes(seed_response_path.read_bytes()),
+        }
+        write_once(
+            run_dir / "seed.json",
+            json.dumps(seed_manifest, indent=2, sort_keys=True).encode() + b"\n",
+        )
+        summary["seed"] = seed_manifest
+        log.append("draft_seeded", **seed_manifest)
 
     try:
         if not live:
@@ -361,28 +395,38 @@ def run_reconciliation(
         else:
             for round_number in range(1, task["maxRounds"] + 1):
                 round_dir = run_dir / f"round-{round_number:02d}"
-                prompt = author_prompt(
-                    task,
-                    round_number=round_number,
-                    prior_draft=prior_draft,
-                    feedback=feedback,
-                )
-                author = _invoke(
-                    agent="claude",
-                    snapshot=snapshot,
-                    prompt=prompt,
-                    schema_path=draft_schema,
-                    validator=validate_draft_response,
-                    prefix=round_dir / "author-claude",
-                    timeout_seconds=task["timeoutSeconds"],
-                    max_turns=task["authorMaxTurns"],
-                    log=log,
-                )
-                if author["status"] == "blocked" or author["requiresHuman"]:
-                    summary["status"] = "blocked_author"
-                    summary["blocker"] = author["notes"]
-                    break
-                draft = author["draft"].strip() + "\n"
+                if round_number == 1 and prior_draft is not None and not feedback:
+                    author = {
+                        "status": "drafted",
+                        "draft": prior_draft,
+                        "notes": [f"Imported from append-only seed run {seed_run_id}."],
+                        "requiresHuman": bool(seed_manifest and seed_manifest["authorRequiresHuman"]),
+                    }
+                    draft = prior_draft
+                    write_once(round_dir / "author-seed.json", json.dumps(author, indent=2).encode() + b"\n")
+                else:
+                    prompt = author_prompt(
+                        task,
+                        round_number=round_number,
+                        prior_draft=prior_draft,
+                        feedback=feedback,
+                    )
+                    author = _invoke(
+                        agent="claude",
+                        snapshot=snapshot,
+                        prompt=prompt,
+                        schema_path=draft_schema,
+                        validator=validate_draft_response,
+                        prefix=round_dir / "author-claude",
+                        timeout_seconds=task["timeoutSeconds"],
+                        max_turns=task["authorMaxTurns"],
+                        log=log,
+                    )
+                    if author["status"] == "blocked":
+                        summary["status"] = "blocked_author"
+                        summary["blocker"] = author["notes"]
+                        break
+                    draft = author["draft"].strip() + "\n"
                 draft_hash = sha256_bytes(draft.encode())
                 write_once(round_dir / "candidate.md", draft.encode())
                 reviews: dict[str, Any] = {}
@@ -412,6 +456,7 @@ def run_reconciliation(
                 round_record = {
                     "round": round_number,
                     "draftSha256": draft_hash,
+                    "authorRequiresHuman": author["requiresHuman"],
                     "reviewers": {
                         reviewer: {
                             "verdict": review["verdict"],
@@ -438,6 +483,8 @@ def run_reconciliation(
                         "reviewers": {reviewer: "pass" for reviewer in task["reviewers"]},
                         "status": "ready_for_operator_decision",
                     }
+                    if seed_run_id is not None:
+                        final_manifest["seedRunId"] = seed_run_id
                     write_once(
                         final_dir / "manifest.json",
                         json.dumps(final_manifest, indent=2, sort_keys=True).encode() + b"\n",

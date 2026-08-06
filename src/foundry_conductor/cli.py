@@ -59,6 +59,11 @@ def build_parser() -> argparse.ArgumentParser:
     )
     reconcile_parser.add_argument("--live", action="store_true")
     reconcile_parser.add_argument(
+        "--resume-draft-from",
+        metavar="RUN_ID",
+        help="continue from a completed Claude draft in an earlier append-only run",
+    )
+    reconcile_parser.add_argument(
         "--confirm-live-models",
         action="store_true",
         help="confirm that live model calls may consume account/API usage",
@@ -82,6 +87,7 @@ def main(argv: list[str] | None = None) -> int:
                 task_path=selected_task,
                 live=args.live,
                 live_confirmed=args.confirm_live_models,
+                seed_run_id=args.resume_draft_from,
             )
             print(json.dumps(result, indent=2, sort_keys=True))
             return 0 if result["status"] in {"planned", "ready_for_operator_decision"} else 3

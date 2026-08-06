@@ -46,6 +46,10 @@ cd /Users/macmini/Documents/GitHub/foundry-conductor
 # Bounded read-only Package 2a prompt reconciliation.
 ./foundryctl reconcile
 ./foundryctl reconcile --live --confirm-live-models
+
+# Continue from an already-preserved Claude draft without regenerating it.
+./foundryctl reconcile --live --confirm-live-models \
+  --resume-draft-from <prior-run-id>
 ```
 
 Run evidence is stored under `runs/<run-id>/`:
