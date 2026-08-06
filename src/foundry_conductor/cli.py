@@ -116,8 +116,8 @@ def build_parser() -> argparse.ArgumentParser:
         help="import valid packet reviews and retry each missing or invalid review at most once",
     )
     inventory_parser.add_argument(
-        "--allow-additional-coverage-cursor-attempt", action="store_true",
-        help="permit one operator-authorized third Cursor coverage-truth attempt",
+        "--allow-additional-cursor-attempt-for", metavar="PACKET_ID",
+        help="permit one operator-authorized third Cursor attempt for the named packet",
     )
     inventory_parser.add_argument("--live", action="store_true")
     inventory_parser.add_argument("--confirm-live-models", action="store_true")
@@ -140,9 +140,7 @@ def main(argv: list[str] | None = None) -> int:
                 live_confirmed=args.confirm_live_models,
                 traceability_run_id=args.resume_traceability_from,
                 packet_review_run_id=args.resume_packet_reviews_from,
-                allow_additional_coverage_cursor_attempt=(
-                    args.allow_additional_coverage_cursor_attempt
-                ),
+                additional_cursor_attempt_packet=args.allow_additional_cursor_attempt_for,
             )
             print(json.dumps(result, indent=2, sort_keys=True))
             return 0 if result["status"] in {"planned", "ready_for_operator_decision"} else 3

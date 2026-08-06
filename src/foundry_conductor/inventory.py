@@ -321,15 +321,18 @@ def run_defect_inventory(
     *, root: Path, task_path: Path, source_run_id: str, candidate_sha256: str,
     live: bool, live_confirmed: bool, traceability_run_id: str | None = None,
     packet_review_run_id: str | None = None,
-    allow_additional_coverage_cursor_attempt: bool = False,
+    additional_cursor_attempt_packet: str | None = None,
 ) -> dict[str, Any]:
     task = load_json(task_path)
     validate_reconciliation_task(task)
     if live and not live_confirmed:
         raise ConductorError("live defect inventory requires --confirm-live-models")
-    if allow_additional_coverage_cursor_attempt and packet_review_run_id is None:
+    packet_ids = {packet["id"] for packet in PACKETS}
+    if additional_cursor_attempt_packet is not None and additional_cursor_attempt_packet not in packet_ids:
+        raise ConductorError("additional Cursor attempt packet is not in the review packet list")
+    if additional_cursor_attempt_packet is not None and packet_review_run_id is None:
         raise ConductorError(
-            "additional coverage Cursor attempt requires --resume-packet-reviews-from"
+            "additional Cursor attempt requires --resume-packet-reviews-from"
         )
     if not re.fullmatch(r"[0-9a-f]{64}", candidate_sha256):
         raise ConductorError("candidate SHA-256 is invalid")
@@ -545,8 +548,8 @@ def run_defect_inventory(
                             attempts = review_attempt_counts.get(key, 0)
                             if attempts >= 2:
                                 if not (
-                                    allow_additional_coverage_cursor_attempt
-                                    and key == "coverage-truth/cursor"
+                                    packet["id"] == additional_cursor_attempt_packet
+                                    and reviewer == "cursor"
                                     and attempts == 2
                                 ):
                                     raise ConductorError(f"{key} exhausted its two bounded attempts")
