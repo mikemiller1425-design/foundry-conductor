@@ -285,3 +285,38 @@ class InventoryTests(unittest.TestCase):
                     candidate_sha256=candidate_hash, live=True, live_confirmed=True,
                     traceability_run_id=trace_id, packet_review_run_id=review_id,
                 )
+            conflict_path.unlink()
+            coverage_cursor = (
+                review_dir / "packets" / "coverage-truth" / "review-cursor-import.json"
+            )
+            coverage_cursor.unlink()
+            counts["coverage-truth/cursor"] = 2
+            (review_dir / "summary.json").write_text(json.dumps({
+                "candidateSha256": candidate_hash, "sourceUnchanged": True,
+                "snapshotClean": True, "reviewAttemptCounts": counts,
+            }), encoding="utf-8")
+
+            def coverage_cursor_review(**kwargs):
+                self.assertEqual("cursor", kwargs["agent"])
+                return {
+                    "verdict": "pass", "candidateSha256": candidate_hash,
+                    "packetId": "coverage-truth",
+                    "packetSha256": packet_hashes["coverage-truth"],
+                    "summary": "complete", "findings": [], "requiresHuman": False,
+                }
+
+            with patch(
+                "foundry_conductor.inventory._invoke", side_effect=coverage_cursor_review
+            ) as invoke:
+                authorized = run_defect_inventory(
+                    root=root, task_path=task_path, source_run_id=source_run_id,
+                    candidate_sha256=candidate_hash, live=True, live_confirmed=True,
+                    traceability_run_id=trace_id, packet_review_run_id=review_id,
+                    allow_additional_coverage_cursor_attempt=True,
+                )
+            self.assertEqual(1, invoke.call_count)
+            self.assertEqual(3, authorized["reviewAttemptCounts"]["coverage-truth/cursor"])
+            events = (
+                Path(authorized["runDirectory"]) / "events.jsonl"
+            ).read_text(encoding="utf-8")
+            self.assertIn('"event":"additional_packet_attempt_authorized"', events)

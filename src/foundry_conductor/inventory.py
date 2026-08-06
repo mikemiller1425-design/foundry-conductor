@@ -321,11 +321,16 @@ def run_defect_inventory(
     *, root: Path, task_path: Path, source_run_id: str, candidate_sha256: str,
     live: bool, live_confirmed: bool, traceability_run_id: str | None = None,
     packet_review_run_id: str | None = None,
+    allow_additional_coverage_cursor_attempt: bool = False,
 ) -> dict[str, Any]:
     task = load_json(task_path)
     validate_reconciliation_task(task)
     if live and not live_confirmed:
         raise ConductorError("live defect inventory requires --confirm-live-models")
+    if allow_additional_coverage_cursor_attempt and packet_review_run_id is None:
+        raise ConductorError(
+            "additional coverage Cursor attempt requires --resume-packet-reviews-from"
+        )
     if not re.fullmatch(r"[0-9a-f]{64}", candidate_sha256):
         raise ConductorError("candidate SHA-256 is invalid")
     if not re.fullmatch(r"[0-9]{8}T[0-9]{6}Z-[a-z0-9-]+-[0-9a-f]{8}", source_run_id):
@@ -539,7 +544,17 @@ def run_defect_inventory(
                             key = f"{packet['id']}/{reviewer}"
                             attempts = review_attempt_counts.get(key, 0)
                             if attempts >= 2:
-                                raise ConductorError(f"{key} exhausted its two bounded attempts")
+                                if not (
+                                    allow_additional_coverage_cursor_attempt
+                                    and key == "coverage-truth/cursor"
+                                    and attempts == 2
+                                ):
+                                    raise ConductorError(f"{key} exhausted its two bounded attempts")
+                                log.append(
+                                    "additional_packet_attempt_authorized",
+                                    packetId=packet["id"], reviewer=reviewer,
+                                    priorAttemptCount=attempts, authorizedAttemptCount=attempts + 1,
+                                )
                             review_attempt_counts[key] = attempts + 1
                             review = _invoke(
                                 agent=reviewer, snapshot=snapshot,
