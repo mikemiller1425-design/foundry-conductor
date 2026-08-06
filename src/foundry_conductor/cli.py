@@ -64,6 +64,11 @@ def build_parser() -> argparse.ArgumentParser:
         help="continue from a completed Claude draft in an earlier append-only run",
     )
     reconcile_parser.add_argument(
+        "--resume-reviewed-from",
+        metavar="RUN_ID",
+        help="continue from the last completed reviewed round in an earlier append-only run",
+    )
+    reconcile_parser.add_argument(
         "--confirm-live-models",
         action="store_true",
         help="confirm that live model calls may consume account/API usage",
@@ -88,6 +93,7 @@ def main(argv: list[str] | None = None) -> int:
                 live=args.live,
                 live_confirmed=args.confirm_live_models,
                 seed_run_id=args.resume_draft_from,
+                reviewed_run_id=args.resume_reviewed_from,
             )
             print(json.dumps(result, indent=2, sort_keys=True))
             return 0 if result["status"] in {"planned", "ready_for_operator_decision"} else 3

@@ -317,11 +317,14 @@ def run_reconciliation(
     live: bool,
     live_confirmed: bool,
     seed_run_id: str | None = None,
+    reviewed_run_id: str | None = None,
 ) -> dict[str, Any]:
     task = load_json(task_path)
     validate_reconciliation_task(task)
     if live and not live_confirmed:
         raise ConductorError("live reconciliation requires --confirm-live-models")
+    if seed_run_id is not None and reviewed_run_id is not None:
+        raise ConductorError("choose only one resume source")
 
     source_repo = Path(task["sourceRepository"]).expanduser().resolve()
     before = fingerprint_repo(source_repo)
@@ -352,6 +355,8 @@ def run_reconciliation(
     prior_draft: str | None = None
     feedback: list[dict[str, Any]] = []
     seed_manifest: dict[str, Any] | None = None
+    resume_manifest: dict[str, Any] | None = None
+    start_round = 1
 
     if seed_run_id is not None:
         if not re.fullmatch(r"[0-9]{8}T[0-9]{6}Z-[a-z0-9-]+-[0-9a-f]{8}", seed_run_id):
@@ -383,6 +388,64 @@ def run_reconciliation(
         summary["seed"] = seed_manifest
         log.append("draft_seeded", **seed_manifest)
 
+    if reviewed_run_id is not None:
+        if not re.fullmatch(r"[0-9]{8}T[0-9]{6}Z-[a-z0-9-]+-[0-9a-f]{8}", reviewed_run_id):
+            raise ConductorError("reviewed run id is invalid")
+        reviewed_dir = (root / "runs" / reviewed_run_id).resolve()
+        if reviewed_dir.parent != (root / "runs").resolve() or not reviewed_dir.is_dir():
+            raise ConductorError(f"reviewed run does not exist: {reviewed_run_id}")
+        reviewed_task = load_json(reviewed_dir / "task.json")
+        reviewed_summary = load_json(reviewed_dir / "summary.json")
+        if reviewed_task.get("expectedHead") != task["expectedHead"]:
+            raise ConductorError("reviewed run used a different Foundry baseline")
+        if reviewed_summary.get("sourceUnchanged") is not True or reviewed_summary.get("snapshotClean") is not True:
+            raise ConductorError("reviewed run did not preserve its source and snapshot boundaries")
+        completed_rounds = reviewed_summary.get("rounds")
+        if not isinstance(completed_rounds, list) or not completed_rounds:
+            raise ConductorError("reviewed run has no completed review round")
+        last_record = completed_rounds[-1]
+        last_round = last_record.get("round")
+        if not isinstance(last_round, int) or not 1 <= last_round < task["maxRounds"]:
+            raise ConductorError("reviewed run has no resumable round")
+        reviewed_round_dir = reviewed_dir / f"round-{last_round:02d}"
+        prior_draft = (reviewed_round_dir / "candidate.md").read_text(encoding="utf-8")
+        draft_hash = sha256_bytes(prior_draft.encode())
+        if draft_hash != last_record.get("draftSha256"):
+            raise ConductorError("reviewed run candidate hash does not match its manifest")
+        imported_reviews: dict[str, Any] = {}
+        for reviewer in task["reviewers"]:
+            review = validate_review_response(
+                load_json(reviewed_round_dir / f"review-{reviewer}.normalized.json")
+            )
+            if review["draftSha256"] != draft_hash:
+                raise ConductorError(f"reviewed run {reviewer} verdict targets the wrong draft")
+            if review["verdict"] == "blocked" or review["requiresHuman"]:
+                raise ConductorError(f"reviewed run {reviewer} verdict is not automatically resumable")
+            imported_reviews[reviewer] = review
+        if all(review["verdict"] == "pass" for review in imported_reviews.values()):
+            raise ConductorError("reviewed run already passed and does not need revision")
+        feedback = [
+            {"reviewer": reviewer, **finding}
+            for reviewer, review in imported_reviews.items()
+            for finding in review["findings"]
+        ]
+        start_round = last_round + 1
+        resume_manifest = {
+            "reviewedRunId": reviewed_run_id,
+            "completedRound": last_round,
+            "draftSha256": draft_hash,
+            "reviewNormalizedSha256": {
+                reviewer: sha256_bytes(
+                    (reviewed_round_dir / f"review-{reviewer}.normalized.json").read_bytes()
+                )
+                for reviewer in task["reviewers"]
+            },
+        }
+        write_once(run_dir / "resume.json", json.dumps(resume_manifest, indent=2, sort_keys=True).encode() + b"\n")
+        summary["resume"] = resume_manifest
+        summary["rounds"] = completed_rounds
+        log.append("reviewed_round_imported", **resume_manifest)
+
     try:
         if not live:
             prompt = author_prompt(
@@ -405,7 +468,7 @@ def run_reconciliation(
             )
             log.append("reconciliation_planned", maxRounds=task["maxRounds"])
         else:
-            for round_number in range(1, task["maxRounds"] + 1):
+            for round_number in range(start_round, task["maxRounds"] + 1):
                 round_dir = run_dir / f"round-{round_number:02d}"
                 if round_number == 1 and prior_draft is not None and not feedback:
                     author = {
@@ -497,6 +560,8 @@ def run_reconciliation(
                     }
                     if seed_run_id is not None:
                         final_manifest["seedRunId"] = seed_run_id
+                    if reviewed_run_id is not None:
+                        final_manifest["reviewedRunId"] = reviewed_run_id
                     write_once(
                         final_dir / "manifest.json",
                         json.dumps(final_manifest, indent=2, sort_keys=True).encode() + b"\n",

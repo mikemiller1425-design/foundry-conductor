@@ -17,7 +17,7 @@
     "cursor"
   ],
   "maxRounds": 3,
-  "authorMaxTurns": 12,
+  "authorMaxTurns": 20,
   "timeoutSeconds": 900,
   "objective": "Draft the final operator-facing authorization prompt for Package 2a only: contract and bounded scanner truth against controlled temporary fixtures. The prompt must authorize implementation only after the operator separately chooses to paste or issue it; this workflow itself authorizes no implementation.",
   "authoritativeSources": [

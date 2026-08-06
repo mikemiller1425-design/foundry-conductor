@@ -248,6 +248,90 @@ class ReconciliationTests(unittest.TestCase):
             self.assertEqual(2, invoked.call_count)
             self.assertEqual(seed_id, result["seedRunId"])
 
+    def test_reviewed_round_resume_skips_completed_author_and_reviews(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            repo = self.make_repo(root)
+            task = self.make_task(repo)
+            task_path = self.write_task(root, task)
+            reviewed_id = "20260101T000000Z-test-reconciliation-abcdef12"
+            reviewed_dir = root / "runs" / reviewed_id
+            round_dir = reviewed_dir / "round-01"
+            round_dir.mkdir(parents=True)
+            (reviewed_dir / "task.json").write_text(json.dumps(task), encoding="utf-8")
+            draft_one = "reviewed draft\n"
+            draft_one_hash = digest(draft_one)
+            round_record = {
+                "round": 1,
+                "draftSha256": draft_one_hash,
+                "authorRequiresHuman": False,
+                "reviewers": {
+                    "codex": {"verdict": "revise", "requiresHuman": False, "findingCount": 1},
+                    "cursor": {"verdict": "pass", "requiresHuman": False, "findingCount": 0},
+                },
+            }
+            (reviewed_dir / "summary.json").write_text(
+                json.dumps(
+                    {
+                        "sourceUnchanged": True,
+                        "snapshotClean": True,
+                        "rounds": [round_record],
+                    }
+                ),
+                encoding="utf-8",
+            )
+            (round_dir / "candidate.md").write_text(draft_one, encoding="utf-8")
+            revise = {
+                "verdict": "revise",
+                "draftSha256": draft_one_hash,
+                "summary": "revise",
+                "findings": [
+                    {
+                        "severity": "error",
+                        "category": "scope",
+                        "message": "too broad",
+                        "requiredChange": "narrow it",
+                    }
+                ],
+                "requiresHuman": False,
+            }
+            passing_one = {
+                "verdict": "pass",
+                "draftSha256": draft_one_hash,
+                "summary": "pass",
+                "findings": [],
+                "requiresHuman": False,
+            }
+            for reviewer, review in {"codex": revise, "cursor": passing_one}.items():
+                (round_dir / f"review-{reviewer}.normalized.json").write_text(
+                    json.dumps(review), encoding="utf-8"
+                )
+            draft_two = "revised draft"
+            passing_two = {
+                "verdict": "pass",
+                "draftSha256": digest(draft_two),
+                "summary": "pass",
+                "findings": [],
+                "requiresHuman": False,
+            }
+            responses = [
+                {"status": "drafted", "draft": draft_two, "notes": [], "requiresHuman": False},
+                passing_two,
+                passing_two,
+            ]
+            with patch("foundry_conductor.reconcile._invoke", side_effect=responses) as invoked:
+                result = run_reconciliation(
+                    root=root,
+                    task_path=task_path,
+                    live=True,
+                    live_confirmed=True,
+                    reviewed_run_id=reviewed_id,
+                )
+            self.assertEqual("ready_for_operator_decision", result["status"])
+            self.assertEqual(3, invoked.call_count)
+            self.assertEqual(reviewed_id, result["reviewedRunId"])
+            self.assertEqual([1, 2], [entry["round"] for entry in result["rounds"]])
+
     def test_cursor_invocation_records_and_sends_schema(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:
             root = Path(temporary)
