@@ -53,7 +53,8 @@ cd /Users/macmini/Documents/GitHub/foundry-conductor
 
 # Only after a separate operator authorization for one extra bounded round.
 ./foundryctl reconcile --live --confirm-live-models \
-  --resume-reviewed-from <prior-run-id> --allow-one-additional-round
+  --resume-reviewed-from <prior-run-id> --allow-one-additional-round \
+  --expected-draft-sha256 <sha256> --allow-cursor-schema-repair
 
 # After explicit authorization, resume a failed reviewed round by exact digest
 # and permit at most one Cursor-only schema repair on the revised draft.

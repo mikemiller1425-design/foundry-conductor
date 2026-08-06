@@ -537,6 +537,91 @@ class ReconciliationTests(unittest.TestCase):
                     allow_one_additional_round=True,
                 )
 
+    def test_later_reviewed_ordinal_is_hash_bound_and_allows_cursor_repair(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            repo = self.make_repo(root)
+            task = self.make_task(repo)
+            task_path = self.write_task(root, task)
+            reviewed_id = "20260101T000000Z-test-reconciliation-abcdef12"
+            reviewed_dir = root / "runs" / reviewed_id
+            round_dir = reviewed_dir / "round-05"
+            round_dir.mkdir(parents=True)
+            (reviewed_dir / "task.json").write_text(json.dumps(task), encoding="utf-8")
+            prior = "fifth-round draft\n"
+            prior_hash = digest(prior)
+            rounds = [{"round": number} for number in (1, 2, 3, 4)] + [{
+                "round": 5,
+                "draftSha256": prior_hash,
+            }]
+            (reviewed_dir / "summary.json").write_text(json.dumps({
+                "sourceUnchanged": True,
+                "snapshotClean": True,
+                "rounds": rounds,
+            }), encoding="utf-8")
+            (round_dir / "candidate.md").write_text(prior, encoding="utf-8")
+            revise = {
+                "verdict": "revise",
+                "draftSha256": prior_hash,
+                "summary": "revise",
+                "findings": [{
+                    "severity": "error",
+                    "category": "typed hashing truth",
+                    "message": "relationship is unconstrained",
+                    "requiredChange": "constrain it",
+                }],
+                "requiresHuman": False,
+            }
+            for reviewer in ("codex", "cursor"):
+                (round_dir / f"review-{reviewer}.normalized.json").write_text(
+                    json.dumps(revise), encoding="utf-8"
+                )
+            revised = "sixth-round draft"
+            passing = {
+                "verdict": "pass",
+                "draftSha256": digest(revised),
+                "summary": "pass",
+                "findings": [],
+                "requiresHuman": False,
+            }
+            calls: list[str] = []
+
+            def invoke_side_effect(**kwargs):
+                calls.append(kwargs["agent"])
+                if len(calls) == 1:
+                    self.assertIn("final correction round", kwargs["prompt"])
+                    return {
+                        "status": "drafted",
+                        "draft": revised,
+                        "notes": [],
+                        "requiresHuman": False,
+                    }
+                if len(calls) == 3:
+                    kwargs["prefix"].with_suffix(".stdout").parent.mkdir(
+                        parents=True, exist_ok=True
+                    )
+                    kwargs["prefix"].with_suffix(".stdout").write_bytes(b"not valid json")
+                    raise ConductorError("no schema-valid structured response found in stdout")
+                return passing
+
+            with patch(
+                "foundry_conductor.reconcile._invoke", side_effect=invoke_side_effect
+            ):
+                result = run_reconciliation(
+                    root=root,
+                    task_path=task_path,
+                    live=True,
+                    live_confirmed=True,
+                    reviewed_run_id=reviewed_id,
+                    expected_draft_sha256=prior_hash,
+                    allow_one_additional_round=True,
+                    allow_cursor_schema_repair=True,
+                )
+            self.assertEqual("ready_for_operator_decision", result["status"])
+            self.assertEqual(["claude", "codex", "cursor", "cursor"], calls)
+            self.assertEqual([1, 2, 3, 4, 5, 6], [entry["round"] for entry in result["rounds"]])
+            self.assertEqual(6, result["resume"]["effectiveMaxRounds"])
+
     def test_failed_reviewed_resume_allows_one_cursor_schema_repair(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:
             root = Path(temporary)

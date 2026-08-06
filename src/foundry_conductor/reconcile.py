@@ -412,10 +412,16 @@ def run_reconciliation(
             r"[0-9a-f]{64}", expected_draft_sha256
         ):
             raise ConductorError("failed-reviewed resume requires a canonical expected draft SHA-256")
-    elif expected_draft_sha256 is not None:
-        raise ConductorError("--expected-draft-sha256 requires --resume-failed-reviewed-from")
-    if allow_cursor_schema_repair and failed_reviewed_run_id is None:
-        raise ConductorError("Cursor schema repair requires --resume-failed-reviewed-from")
+    elif expected_draft_sha256 is not None and reviewed_run_id is None:
+        raise ConductorError(
+            "--expected-draft-sha256 requires --resume-reviewed-from or "
+            "--resume-failed-reviewed-from"
+        )
+    if allow_cursor_schema_repair and reviewed_run_id is None and failed_reviewed_run_id is None:
+        raise ConductorError(
+            "Cursor schema repair requires --resume-reviewed-from or "
+            "--resume-failed-reviewed-from"
+        )
 
     source_repo = Path(task["sourceRepository"]).expanduser().resolve()
     before = fingerprint_repo(source_repo)
@@ -503,17 +509,28 @@ def run_reconciliation(
         authorized_extra_resume = (
             allow_one_additional_round
             and isinstance(last_round, int)
-            and last_round == task["maxRounds"]
+            and last_round >= task["maxRounds"]
         )
         if not normal_resume and not authorized_extra_resume:
             raise ConductorError("reviewed run has no resumable round")
         if authorized_extra_resume:
-            effective_max_rounds = task["maxRounds"] + 1
+            effective_max_rounds = last_round + 1
         reviewed_round_dir = reviewed_dir / f"round-{last_round:02d}"
         prior_draft = (reviewed_round_dir / "candidate.md").read_text(encoding="utf-8")
         draft_hash = sha256_bytes(prior_draft.encode())
         if draft_hash != last_record.get("draftSha256"):
             raise ConductorError("reviewed run candidate hash does not match its manifest")
+        if last_round > task["maxRounds"]:
+            if not isinstance(expected_draft_sha256, str) or not re.fullmatch(
+                r"[0-9a-f]{64}", expected_draft_sha256
+            ):
+                raise ConductorError(
+                    "later-ordinal reviewed resume requires a canonical expected draft SHA-256"
+                )
+            if draft_hash != expected_draft_sha256:
+                raise ConductorError(
+                    "reviewed run candidate does not match the authorized digest"
+                )
         imported_reviews: dict[str, Any] = {}
         for reviewer in task["reviewers"]:
             review = validate_review_response(
@@ -764,7 +781,10 @@ def run_reconciliation(
                         round_number=round_number,
                         prior_draft=prior_draft,
                         feedback=feedback,
-                        revision_only=failed_reviewed_run_id is not None,
+                        revision_only=(
+                            failed_reviewed_run_id is not None
+                            or (reviewed_run_id is not None and allow_one_additional_round)
+                        ),
                     )
                     author = _invoke(
                         agent="claude",

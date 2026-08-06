@@ -85,7 +85,7 @@ def build_parser() -> argparse.ArgumentParser:
     )
     reconcile_parser.add_argument(
         "--expected-draft-sha256",
-        help="bind a failed-reviewed resume to the operator-authorized candidate digest",
+        help="bind an extra-round resume to the operator-authorized candidate digest",
     )
     reconcile_parser.add_argument(
         "--allow-cursor-schema-repair",
