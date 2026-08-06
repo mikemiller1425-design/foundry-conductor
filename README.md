@@ -42,6 +42,10 @@ cd /Users/macmini/Documents/GitHub/foundry-conductor
 
 # Future explicit connectivity probe. May consume provider/account usage.
 ./foundryctl run --live --confirm-live-models
+
+# Bounded read-only Package 2a prompt reconciliation.
+./foundryctl reconcile
+./foundryctl reconcile --live --confirm-live-models
 ```
 
 Run evidence is stored under `runs/<run-id>/`:
@@ -92,3 +96,18 @@ Do not add write-mode tasks yet. The next step after all three CLI probes pass
 is a separately authorized, controlled-write design using isolated worktrees,
 allowed-path enforcement, bounded repair rounds, independent review, and no
 automatic push.
+
+## Phase 0.2 reconciliation
+
+The `reconcile` command runs a maximum of three rounds:
+
+1. Claude drafts a complete authorization prompt.
+2. Codex and Cursor independently review the exact same draft SHA-256.
+3. Required changes are merged and returned to Claude.
+4. Both reviewers must return schema-valid `pass` verdicts with zero findings
+   against the same final digest.
+
+Every prompt, raw response, normalized response, digest, round manifest, and
+verdict is written once under the run directory. A successful run writes the
+candidate to `final/package-2a-authorization-prompt.md` and stops for the
+operator. It does not execute the candidate prompt.

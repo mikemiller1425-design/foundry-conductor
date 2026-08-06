@@ -252,6 +252,7 @@ def build_agent_command(
     snapshot: Path,
     prompt: str,
     response_schema: Path,
+    max_turns: int = 5,
 ) -> AgentCommand:
     executable = resolve_binary(agent)
     if executable is None:
@@ -288,7 +289,7 @@ def build_agent_command(
             "--tools",
             "Read,Glob,Grep",
             "--max-turns",
-            "5",
+            str(max_turns),
             "--no-session-persistence",
             "--json-schema",
             schema,
@@ -358,22 +359,23 @@ def _json_values_from_text(text: str) -> Iterable[Any]:
             continue
 
 
-def _result_candidates(value: Any) -> Iterable[Any]:
+def _structured_candidates(value: Any) -> Iterable[Any]:
     if isinstance(value, dict):
-        if {"status", "summary", "findings", "requiresHuman"}.issubset(value):
-            yield value
-        for key in ("structured_output", "result", "content", "text", "message", "item"):
-            if key in value:
-                yield from _result_candidates(value[key])
+        yield value
+        for child in value.values():
+            yield from _structured_candidates(child)
     elif isinstance(value, list):
         for item in value:
-            yield from _result_candidates(item)
+            yield from _structured_candidates(item)
     elif isinstance(value, str):
         for decoded in _json_values_from_text(value):
-            yield from _result_candidates(decoded)
+            yield from _structured_candidates(decoded)
 
 
-def parse_agent_result(stdout: bytes) -> dict[str, Any]:
+def parse_structured_response(
+    stdout: bytes,
+    validator: Any,
+) -> dict[str, Any]:
     text = stdout.decode("utf-8", errors="replace")
     documents = list(_json_values_from_text(text))
     if not documents:
@@ -383,12 +385,16 @@ def parse_agent_result(stdout: bytes) -> dict[str, Any]:
             except json.JSONDecodeError:
                 continue
     for document in reversed(documents):
-        for candidate in _result_candidates(document):
+        for candidate in _structured_candidates(document):
             try:
-                return validate_agent_result(candidate)
+                return validator(candidate)
             except ConductorError:
                 continue
-    raise ConductorError("no schema-valid agent result found in stdout")
+    raise ConductorError("no schema-valid structured response found in stdout")
+
+
+def parse_agent_result(stdout: bytes) -> dict[str, Any]:
+    return parse_structured_response(stdout, validate_agent_result)
 
 
 def redact_command(command: AgentCommand) -> dict[str, Any]:

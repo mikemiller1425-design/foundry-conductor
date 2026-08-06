@@ -6,6 +6,7 @@ import sys
 from pathlib import Path
 
 from .core import ConductorError, doctor, execute_task, load_json
+from .reconcile import run_reconciliation
 
 
 def project_root() -> Path:
@@ -46,6 +47,22 @@ def build_parser() -> argparse.ArgumentParser:
         action="store_true",
         help="confirm that live model calls may consume account/API usage",
     )
+
+    reconcile_parser = subcommands.add_parser(
+        "reconcile",
+        help="run a bounded read-only author/reviewer reconciliation",
+    )
+    reconcile_parser.add_argument(
+        "task",
+        nargs="?",
+        default="package-2a-authorization-reconciliation",
+    )
+    reconcile_parser.add_argument("--live", action="store_true")
+    reconcile_parser.add_argument(
+        "--confirm-live-models",
+        action="store_true",
+        help="confirm that live model calls may consume account/API usage",
+    )
     return parser
 
 
@@ -59,6 +76,15 @@ def main(argv: list[str] | None = None) -> int:
             result = doctor(load_json(selected_task))
             print(json.dumps(result, indent=2, sort_keys=True))
             return 0 if result["ok"] else 2
+        if args.command == "reconcile":
+            result = run_reconciliation(
+                root=root,
+                task_path=selected_task,
+                live=args.live,
+                live_confirmed=args.confirm_live_models,
+            )
+            print(json.dumps(result, indent=2, sort_keys=True))
+            return 0 if result["status"] in {"planned", "ready_for_operator_decision"} else 3
         if args.command == "plan":
             result = execute_task(
                 root=root,

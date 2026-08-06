@@ -1,0 +1,25 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "title": "Foundry Reconciliation Draft",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["status", "draft", "notes", "requiresHuman"],
+  "properties": {
+    "status": {
+      "type": "string",
+      "enum": ["drafted", "blocked"]
+    },
+    "draft": {
+      "type": "string"
+    },
+    "notes": {
+      "type": "array",
+      "items": {
+        "type": "string"
+      }
+    },
+    "requiresHuman": {
+      "type": "boolean"
+    }
+  }
+}

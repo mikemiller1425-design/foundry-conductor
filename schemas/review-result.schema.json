@@ -1,0 +1,50 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "title": "Foundry Reconciliation Review",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["verdict", "draftSha256", "summary", "findings", "requiresHuman"],
+  "properties": {
+    "verdict": {
+      "type": "string",
+      "enum": ["pass", "revise", "blocked"]
+    },
+    "draftSha256": {
+      "type": "string",
+      "pattern": "^[0-9a-f]{64}$"
+    },
+    "summary": {
+      "type": "string",
+      "minLength": 1
+    },
+    "findings": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": ["severity", "category", "message", "requiredChange"],
+        "properties": {
+          "severity": {
+            "type": "string",
+            "enum": ["warning", "error"]
+          },
+          "category": {
+            "type": "string",
+            "minLength": 1
+          },
+          "message": {
+            "type": "string",
+            "minLength": 1
+          },
+          "requiredChange": {
+            "type": "string",
+            "minLength": 1
+          }
+        }
+      }
+    },
+    "requiresHuman": {
+      "type": "boolean"
+    }
+  }
+}

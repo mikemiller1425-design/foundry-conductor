@@ -1,0 +1,34 @@
+{
+  "schemaVersion": 1,
+  "workflow": "bounded_reconciliation",
+  "id": "package-2a-authorization-reconciliation",
+  "sourceRepository": "/Users/macmini/Documents/GitHub/Foundry",
+  "expectedBranch": "main",
+  "expectedHead": "c1607ad3068504438281f3e667d7fef4c9cc2db2",
+  "permissions": {
+    "repositoryWrite": false,
+    "nasAccess": false,
+    "push": false,
+    "liveModelCalls": true
+  },
+  "author": "claude",
+  "reviewers": [
+    "codex",
+    "cursor"
+  ],
+  "maxRounds": 3,
+  "authorMaxTurns": 12,
+  "timeoutSeconds": 900,
+  "objective": "Draft the final operator-facing authorization prompt for Package 2a only: contract and bounded scanner truth against controlled temporary fixtures. The prompt must authorize implementation only after the operator separately chooses to paste or issue it; this workflow itself authorizes no implementation.",
+  "authoritativeSources": [
+    "docs/01-mission/foundry-package-2-decision-record-2026-08-06.md",
+    "docs/03-architecture/foundry-construction-map.md",
+    "docs/03-architecture/nas-readonly-boundary-threat-model.md",
+    "docs/01-mission/foundry-package-1b-decision-record-2026-08-05.md",
+    "CHANGELOG.md"
+  ],
+  "reviewerFocus": {
+    "codex": "Audit governance, security, exact allowed paths, C-1 through C-8 plus C-12 and C-13, typed hashing truth, six dispositions, four coverage dimensions, bounded traversal, fixture proofs, source immutability, stop conditions, and explicit exclusion of 2b through 2d.",
+    "cursor": "Audit contract completeness from the future frontend consumer's perspective without expanding into 2c: explicit unknown or withheld states, no invented totals or identity, stable typed fields, fixture coverage for hostile and partial states, CONFIGURED_NAS_ROOTS remaining empty, and no frontend or WorldCanvas work."
+  }
+}
