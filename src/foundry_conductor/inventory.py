@@ -433,9 +433,16 @@ def run_defect_inventory(
             for reviewer in task["reviewers"]:
                 key = f"{packet['id']}/{reviewer}"
                 normalized_path = review_dir / "packets" / packet["id"] / f"review-{reviewer}.normalized.json"
+                import_path = review_dir / "packets" / packet["id"] / f"review-{reviewer}-import.json"
                 stdout_path = review_dir / "packets" / packet["id"] / f"review-{reviewer}.stdout"
-                if normalized_path.is_file():
-                    review = validate_packet_review(load_json(normalized_path))
+                review_paths = [path for path in (normalized_path, import_path) if path.is_file()]
+                if review_paths:
+                    reviews = [validate_packet_review(load_json(path)) for path in review_paths]
+                    if len(reviews) == 2 and reviews[0] != reviews[1]:
+                        raise ConductorError(
+                            f"conflicting completed {reviewer} reviews for {packet['id']}"
+                        )
+                    review = reviews[0]
                     if (
                         review["candidateSha256"] != candidate_sha256
                         or review["packetId"] != packet["id"]
@@ -443,7 +450,9 @@ def run_defect_inventory(
                     ):
                         raise ConductorError(f"imported {reviewer} review targets the wrong packet")
                     packet_imports[reviewer] = review
-                    packet_hashes[reviewer] = sha256_bytes(normalized_path.read_bytes())
+                    packet_hashes[reviewer] = sha256_bytes(
+                        json.dumps(review, sort_keys=True, separators=(",", ":")).encode()
+                    )
                     review_attempt_counts[key] = max(review_attempt_counts.get(key, 0), 1)
                 elif stdout_path.is_file():
                     review_attempt_counts[key] = max(review_attempt_counts.get(key, 0), 1)

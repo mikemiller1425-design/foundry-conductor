@@ -8,7 +8,7 @@ import unittest
 from pathlib import Path
 from unittest.mock import patch
 
-from foundry_conductor.core import fingerprint_repo
+from foundry_conductor.core import ConductorError, fingerprint_repo
 from foundry_conductor.inventory import (
     PACKETS,
     run_defect_inventory,
@@ -205,3 +205,83 @@ class InventoryTests(unittest.TestCase):
         self.assertEqual(value, validate_traceability_result(value))
         value["requiresHuman"] = True
         self.assertEqual(value, validate_traceability_result(value))
+
+    def test_second_generation_resume_reuses_imported_reviews(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            repo = self.make_repo(root)
+            task = self.make_task(repo)
+            task_path = root / "task.json"
+            task_path.write_text(json.dumps(task), encoding="utf-8")
+            source_run_id, candidate_hash = self.make_preserved_run(root, task)
+            candidate = (root / "runs" / source_run_id / "round-06" / "candidate.md").read_text()
+            from foundry_conductor.inventory import _packet_text
+            packet_hashes = {
+                packet["id"]: hashlib.sha256(_packet_text(candidate, packet["ranges"]).encode()).hexdigest()
+                for packet in PACKETS
+            }
+
+            trace_id = "20260101T000001Z-package-2a-defect-inventory-bcdef123"
+            trace_dir = root / "runs" / trace_id
+            (trace_dir / "traceability").mkdir(parents=True)
+            (trace_dir / "summary.json").write_text(json.dumps({
+                "candidateSha256": candidate_hash, "sourceUnchanged": True, "snapshotClean": True,
+            }), encoding="utf-8")
+            traceability = {
+                "verdict": "complete", "candidateSha256": candidate_hash,
+                "entries": [{
+                    "requirementId": "R-1", "requirement": "all requirements",
+                    "candidateLocations": ["candidate"],
+                    "packetIds": [packet["id"] for packet in PACKETS],
+                    "status": "covered", "notes": "",
+                }], "gaps": [], "requiresHuman": False,
+            }
+            (trace_dir / "traceability" / "claude.stdout").write_text(
+                json.dumps({"result": json.dumps(traceability)}), encoding="utf-8"
+            )
+
+            review_id = "20260101T000002Z-package-2a-defect-inventory-cdef1234"
+            review_dir = root / "runs" / review_id
+            (review_dir / "summary.json").parent.mkdir(parents=True)
+            counts = {f"{packet['id']}/{reviewer}": 1 for packet in PACKETS for reviewer in task["reviewers"]}
+            (review_dir / "summary.json").write_text(json.dumps({
+                "candidateSha256": candidate_hash, "sourceUnchanged": True, "snapshotClean": True,
+                "reviewAttemptCounts": counts,
+            }), encoding="utf-8")
+            for packet in PACKETS:
+                packet_dir = review_dir / "packets" / packet["id"]
+                packet_dir.mkdir(parents=True)
+                (packet_dir / "manifest.json").write_text(json.dumps({
+                    "candidateSha256": candidate_hash, "packetSha256": packet_hashes[packet["id"]],
+                }), encoding="utf-8")
+                for reviewer in task["reviewers"]:
+                    review = {
+                        "verdict": "pass", "candidateSha256": candidate_hash,
+                        "packetId": packet["id"], "packetSha256": packet_hashes[packet["id"]],
+                        "summary": "complete", "findings": [], "requiresHuman": False,
+                    }
+                    (packet_dir / f"review-{reviewer}-import.json").write_text(
+                        json.dumps(review), encoding="utf-8"
+                    )
+
+            with patch("foundry_conductor.inventory._invoke") as invoke:
+                result = run_defect_inventory(
+                    root=root, task_path=task_path, source_run_id=source_run_id,
+                    candidate_sha256=candidate_hash, live=True, live_confirmed=True,
+                    traceability_run_id=trace_id, packet_review_run_id=review_id,
+                )
+            invoke.assert_not_called()
+            self.assertEqual("ready_for_operator_decision", result["status"])
+            self.assertEqual(counts, result["reviewAttemptCounts"])
+            conflict_path = review_dir / "packets" / "hashing-identity" / "review-codex.normalized.json"
+            conflicting = json.loads(
+                (review_dir / "packets" / "hashing-identity" / "review-codex-import.json").read_text()
+            )
+            conflicting["summary"] = "different completed review"
+            conflict_path.write_text(json.dumps(conflicting), encoding="utf-8")
+            with self.assertRaisesRegex(ConductorError, "conflicting completed codex reviews"):
+                run_defect_inventory(
+                    root=root, task_path=task_path, source_run_id=source_run_id,
+                    candidate_sha256=candidate_hash, live=True, live_confirmed=True,
+                    traceability_run_id=trace_id, packet_review_run_id=review_id,
+                )
