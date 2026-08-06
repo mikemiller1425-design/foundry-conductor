@@ -1,0 +1,30 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "title": "Foundry Package 2a Traceability Matrix",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["verdict", "candidateSha256", "entries", "gaps", "requiresHuman"],
+  "properties": {
+    "verdict": {"type": "string", "enum": ["complete", "blocked"]},
+    "candidateSha256": {"type": "string", "pattern": "^[0-9a-f]{64}$"},
+    "entries": {
+      "type": "array",
+      "minItems": 1,
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": ["requirementId", "requirement", "candidateLocations", "packetIds", "status", "notes"],
+        "properties": {
+          "requirementId": {"type": "string", "minLength": 1},
+          "requirement": {"type": "string", "minLength": 1},
+          "candidateLocations": {"type": "array", "items": {"type": "string", "minLength": 1}},
+          "packetIds": {"type": "array", "minItems": 1, "items": {"type": "string", "minLength": 1}},
+          "status": {"type": "string", "enum": ["covered", "gap", "contradiction"]},
+          "notes": {"type": "string"}
+        }
+      }
+    },
+    "gaps": {"type": "array", "items": {"type": "string", "minLength": 1}},
+    "requiresHuman": {"type": "boolean"}
+  }
+}

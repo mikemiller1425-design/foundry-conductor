@@ -62,6 +62,10 @@ cd /Users/macmini/Documents/GitHub/foundry-conductor
   --resume-failed-reviewed-from <prior-run-id> \
   --expected-draft-sha256 <sha256> --allow-one-additional-round \
   --allow-cursor-schema-repair
+
+# Packetized exhaustive defect inventory; never revises or issues the candidate.
+./foundryctl inventory --live --confirm-live-models \
+  --from-run <prior-run-id> --candidate-sha256 <sha256>
 ```
 
 Run evidence is stored under `runs/<run-id>/`:

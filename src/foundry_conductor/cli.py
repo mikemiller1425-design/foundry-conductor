@@ -6,6 +6,7 @@ import sys
 from pathlib import Path
 
 from .core import ConductorError, doctor, execute_task, load_json
+from .inventory import run_defect_inventory
 from .reconcile import run_reconciliation
 
 
@@ -97,6 +98,17 @@ def build_parser() -> argparse.ArgumentParser:
         action="store_true",
         help="confirm that live model calls may consume account/API usage",
     )
+
+    inventory_parser = subcommands.add_parser(
+        "inventory", help="run a packetized read-only Package 2a defect inventory"
+    )
+    inventory_parser.add_argument(
+        "task", nargs="?", default="package-2a-authorization-reconciliation"
+    )
+    inventory_parser.add_argument("--from-run", required=True, metavar="RUN_ID")
+    inventory_parser.add_argument("--candidate-sha256", required=True)
+    inventory_parser.add_argument("--live", action="store_true")
+    inventory_parser.add_argument("--confirm-live-models", action="store_true")
     return parser
 
 
@@ -106,6 +118,17 @@ def main(argv: list[str] | None = None) -> int:
     root = project_root()
     try:
         selected_task = task_path(root, args.task)
+        if args.command == "inventory":
+            result = run_defect_inventory(
+                root=root,
+                task_path=selected_task,
+                source_run_id=args.from_run,
+                candidate_sha256=args.candidate_sha256,
+                live=args.live,
+                live_confirmed=args.confirm_live_models,
+            )
+            print(json.dumps(result, indent=2, sort_keys=True))
+            return 0 if result["status"] in {"planned", "ready_for_operator_decision"} else 3
         if args.command == "doctor":
             result = doctor(load_json(selected_task))
             print(json.dumps(result, indent=2, sort_keys=True))
