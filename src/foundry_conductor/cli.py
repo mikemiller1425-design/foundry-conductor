@@ -79,6 +79,20 @@ def build_parser() -> argparse.ArgumentParser:
         help="continue an incomplete round from its preserved draft and valid reviews",
     )
     reconcile_parser.add_argument(
+        "--resume-failed-reviewed-from",
+        metavar="RUN_ID",
+        help="continue from a failed round with a preserved draft and at least one valid review",
+    )
+    reconcile_parser.add_argument(
+        "--expected-draft-sha256",
+        help="bind a failed-reviewed resume to the operator-authorized candidate digest",
+    )
+    reconcile_parser.add_argument(
+        "--allow-cursor-schema-repair",
+        action="store_true",
+        help="permit one Cursor-only schema repair against an unchanged candidate digest",
+    )
+    reconcile_parser.add_argument(
         "--confirm-live-models",
         action="store_true",
         help="confirm that live model calls may consume account/API usage",
@@ -106,6 +120,9 @@ def main(argv: list[str] | None = None) -> int:
                 reviewed_run_id=args.resume_reviewed_from,
                 partial_run_id=args.resume_partial_from,
                 allow_one_additional_round=args.allow_one_additional_round,
+                failed_reviewed_run_id=args.resume_failed_reviewed_from,
+                expected_draft_sha256=args.expected_draft_sha256,
+                allow_cursor_schema_repair=args.allow_cursor_schema_repair,
             )
             print(json.dumps(result, indent=2, sort_keys=True))
             return 0 if result["status"] in {"planned", "ready_for_operator_decision"} else 3

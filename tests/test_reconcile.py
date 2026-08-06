@@ -537,6 +537,111 @@ class ReconciliationTests(unittest.TestCase):
                     allow_one_additional_round=True,
                 )
 
+    def test_failed_reviewed_resume_allows_one_cursor_schema_repair(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            repo = self.make_repo(root)
+            task = self.make_task(repo)
+            task_path = self.write_task(root, task)
+            failed_id = "20260101T000000Z-test-reconciliation-abcdef12"
+            failed_dir = root / "runs" / failed_id
+            round_dir = failed_dir / "round-04"
+            round_dir.mkdir(parents=True)
+            (failed_dir / "task.json").write_text(json.dumps(task), encoding="utf-8")
+            prior = "fourth-round candidate\n"
+            prior_hash = digest(prior)
+            (failed_dir / "summary.json").write_text(json.dumps({
+                "status": "failed",
+                "sourceUnchanged": True,
+                "snapshotClean": True,
+                "rounds": [{"round": number} for number in (1, 2, 3)],
+            }), encoding="utf-8")
+            (round_dir / "candidate.md").write_text(prior, encoding="utf-8")
+            (round_dir / "author-claude.normalized.json").write_text(json.dumps({
+                "status": "drafted",
+                "draft": prior.strip(),
+                "notes": [],
+                "requiresHuman": False,
+            }), encoding="utf-8")
+            revise = {
+                "verdict": "revise",
+                "draftSha256": prior_hash,
+                "summary": "revise",
+                "findings": [{
+                    "severity": "error",
+                    "category": "security-proof-scope",
+                    "message": "test code is included",
+                    "requiredChange": "exclude fixture-only tests",
+                }],
+                "requiresHuman": False,
+            }
+            (round_dir / "review-codex.normalized.json").write_text(
+                json.dumps(revise), encoding="utf-8"
+            )
+            (round_dir / "review-cursor.stdout").write_bytes(b"invalid prior cursor output")
+            revised = "fifth-round candidate"
+            revised_hash = digest(revised)
+            passing = {
+                "verdict": "pass",
+                "draftSha256": revised_hash,
+                "summary": "pass",
+                "findings": [],
+                "requiresHuman": False,
+            }
+            calls: list[str] = []
+
+            def invoke_side_effect(**kwargs):
+                calls.append(kwargs["agent"])
+                if len(calls) == 1:
+                    return {
+                        "status": "drafted",
+                        "draft": revised,
+                        "notes": [],
+                        "requiresHuman": False,
+                    }
+                if len(calls) == 2:
+                    return passing
+                if len(calls) == 3:
+                    kwargs["prefix"].with_suffix(".stdout").parent.mkdir(
+                        parents=True, exist_ok=True
+                    )
+                    kwargs["prefix"].with_suffix(".stdout").write_bytes(b"not valid json")
+                    raise ConductorError("no schema-valid structured response found in stdout")
+                return passing
+
+            with patch(
+                "foundry_conductor.reconcile._invoke", side_effect=invoke_side_effect
+            ):
+                result = run_reconciliation(
+                    root=root,
+                    task_path=task_path,
+                    live=True,
+                    live_confirmed=True,
+                    failed_reviewed_run_id=failed_id,
+                    expected_draft_sha256=prior_hash,
+                    allow_one_additional_round=True,
+                    allow_cursor_schema_repair=True,
+                )
+            self.assertEqual("ready_for_operator_decision", result["status"])
+            self.assertEqual(["claude", "codex", "cursor", "cursor"], calls)
+            self.assertEqual([1, 2, 3, 4, 5], [entry["round"] for entry in result["rounds"]])
+            self.assertEqual(failed_id, result["failedReviewedRunId"])
+
+    def test_failed_reviewed_resume_requires_exact_digest(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            repo = self.make_repo(root)
+            task_path = self.write_task(root, self.make_task(repo))
+            with self.assertRaisesRegex(ConductorError, "canonical expected draft"):
+                run_reconciliation(
+                    root=root,
+                    task_path=task_path,
+                    live=True,
+                    live_confirmed=True,
+                    failed_reviewed_run_id="20260101T000000Z-test-reconciliation-abcdef12",
+                    allow_one_additional_round=True,
+                )
+
     def test_cursor_invocation_records_and_sends_schema(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:
             root = Path(temporary)
@@ -578,6 +683,43 @@ class ReconciliationTests(unittest.TestCase):
             recorded = prefix.with_suffix(".prompt.txt").read_text(encoding="utf-8")
             self.assertIn("required-json-schema", recorded)
             self.assertIn('"verdict"', recorded)
+            self.assertTrue(json.loads(
+                prefix.with_suffix(".validation.json").read_text(encoding="utf-8")
+            )["valid"])
+
+    def test_invalid_response_records_validation_outcome(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            snapshot = self.make_repo(root)
+            schema = root / "review-schema.json"
+            schema.write_text(json.dumps({"type": "object"}), encoding="utf-8")
+            prefix = root / "evidence" / "review-cursor"
+            completed = subprocess.CompletedProcess(
+                args=[], returncode=0, stdout=b"not json", stderr=b""
+            )
+            from foundry_conductor.core import AppendOnlyLog
+
+            log = AppendOnlyLog(root / "events.jsonl")
+            with patch("foundry_conductor.reconcile.resolve_binary", return_value="cursor-agent"), patch(
+                "foundry_conductor.reconcile.run_command", return_value=completed
+            ):
+                with self.assertRaisesRegex(ConductorError, "schema-valid"):
+                    _invoke(
+                        agent="cursor",
+                        snapshot=snapshot,
+                        prompt="review this",
+                        schema_path=schema,
+                        validator=validate_review_response,
+                        prefix=prefix,
+                        timeout_seconds=30,
+                        max_turns=5,
+                        log=log,
+                    )
+            validation = json.loads(
+                prefix.with_suffix(".validation.json").read_text(encoding="utf-8")
+            )
+            self.assertFalse(validation["valid"])
+            self.assertIn("schema-valid", validation["error"])
 
 
 if __name__ == "__main__":
