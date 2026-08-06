@@ -70,7 +70,8 @@ cd /Users/macmini/Documents/GitHub/foundry-conductor
 # Resume packet reviews from a preserved matrix response without recalling Claude.
 ./foundryctl inventory --live --confirm-live-models \
   --from-run <candidate-run-id> --candidate-sha256 <sha256> \
-  --resume-traceability-from <inventory-run-id>
+  --resume-traceability-from <matrix-run-id> \
+  --resume-packet-reviews-from <review-run-id>
 ```
 
 Run evidence is stored under `runs/<run-id>/`:

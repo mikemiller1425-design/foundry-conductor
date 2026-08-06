@@ -111,6 +111,10 @@ def build_parser() -> argparse.ArgumentParser:
         "--resume-traceability-from", metavar="RUN_ID",
         help="import a preserved schema-valid Claude matrix without invoking Claude again",
     )
+    inventory_parser.add_argument(
+        "--resume-packet-reviews-from", metavar="RUN_ID",
+        help="import valid packet reviews and retry each missing or invalid review at most once",
+    )
     inventory_parser.add_argument("--live", action="store_true")
     inventory_parser.add_argument("--confirm-live-models", action="store_true")
     return parser
@@ -131,6 +135,7 @@ def main(argv: list[str] | None = None) -> int:
                 live=args.live,
                 live_confirmed=args.confirm_live_models,
                 traceability_run_id=args.resume_traceability_from,
+                packet_review_run_id=args.resume_packet_reviews_from,
             )
             print(json.dumps(result, indent=2, sort_keys=True))
             return 0 if result["status"] in {"planned", "ready_for_operator_decision"} else 3

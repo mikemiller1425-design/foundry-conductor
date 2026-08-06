@@ -320,6 +320,7 @@ stop for the operator's decision.
 def run_defect_inventory(
     *, root: Path, task_path: Path, source_run_id: str, candidate_sha256: str,
     live: bool, live_confirmed: bool, traceability_run_id: str | None = None,
+    packet_review_run_id: str | None = None,
 ) -> dict[str, Any]:
     task = load_json(task_path)
     validate_reconciliation_task(task)
@@ -333,6 +334,10 @@ def run_defect_inventory(
         r"[0-9]{8}T[0-9]{6}Z-[a-z0-9-]+-[0-9a-f]{8}", traceability_run_id
     ):
         raise ConductorError("traceability run id is invalid")
+    if packet_review_run_id is not None and not re.fullmatch(
+        r"[0-9]{8}T[0-9]{6}Z-[a-z0-9-]+-[0-9a-f]{8}", packet_review_run_id
+    ):
+        raise ConductorError("packet review run id is invalid")
     source_dir = (root / "runs" / source_run_id).resolve()
     if source_dir.parent != (root / "runs").resolve() or not source_dir.is_dir():
         raise ConductorError("source run does not exist")
@@ -398,10 +403,70 @@ def run_defect_inventory(
         packet_records.append(record)
     write_once(run_dir / "packet-manifest.json", json.dumps(packet_records, indent=2, sort_keys=True).encode() + b"\n")
 
+    imported_reviews: dict[str, dict[str, dict[str, Any]]] = {}
+    review_attempt_counts: dict[str, int] = {}
+    if packet_review_run_id is not None:
+        review_dir = (root / "runs" / packet_review_run_id).resolve()
+        if review_dir.parent != (root / "runs").resolve() or not review_dir.is_dir():
+            raise ConductorError("packet review run does not exist")
+        review_summary = load_json(review_dir / "summary.json")
+        if review_summary.get("candidateSha256") != candidate_sha256:
+            raise ConductorError("packet review run targets a different candidate")
+        if review_summary.get("sourceUnchanged") is not True or review_summary.get("snapshotClean") is not True:
+            raise ConductorError("packet review run did not preserve its boundaries")
+        prior_counts = review_summary.get("reviewAttemptCounts", {})
+        if not isinstance(prior_counts, dict):
+            raise ConductorError("packet review attempt counts are invalid")
+        review_attempt_counts = {
+            str(key): int(value) for key, value in prior_counts.items()
+            if isinstance(value, int) and value >= 0
+        }
+        imported_hashes: dict[str, dict[str, str]] = {}
+        for packet in packet_values:
+            prior_manifest = load_json(review_dir / "packets" / packet["id"] / "manifest.json")
+            if prior_manifest.get("candidateSha256") != candidate_sha256 or prior_manifest.get(
+                "packetSha256"
+            ) != packet["sha256"]:
+                raise ConductorError(f"packet review run {packet['id']} manifest does not match")
+            packet_imports: dict[str, dict[str, Any]] = {}
+            packet_hashes: dict[str, str] = {}
+            for reviewer in task["reviewers"]:
+                key = f"{packet['id']}/{reviewer}"
+                normalized_path = review_dir / "packets" / packet["id"] / f"review-{reviewer}.normalized.json"
+                stdout_path = review_dir / "packets" / packet["id"] / f"review-{reviewer}.stdout"
+                if normalized_path.is_file():
+                    review = validate_packet_review(load_json(normalized_path))
+                    if (
+                        review["candidateSha256"] != candidate_sha256
+                        or review["packetId"] != packet["id"]
+                        or review["packetSha256"] != packet["sha256"]
+                    ):
+                        raise ConductorError(f"imported {reviewer} review targets the wrong packet")
+                    packet_imports[reviewer] = review
+                    packet_hashes[reviewer] = sha256_bytes(normalized_path.read_bytes())
+                    review_attempt_counts[key] = max(review_attempt_counts.get(key, 0), 1)
+                elif stdout_path.is_file():
+                    review_attempt_counts[key] = max(review_attempt_counts.get(key, 0), 1)
+            if packet_imports:
+                imported_reviews[packet["id"]] = packet_imports
+                imported_hashes[packet["id"]] = packet_hashes
+        packet_import = {
+            "packetReviewRunId": packet_review_run_id,
+            "candidateSha256": candidate_sha256,
+            "normalizedReviewSha256": imported_hashes,
+            "reviewAttemptCounts": review_attempt_counts,
+        }
+        write_once(
+            run_dir / "packet-review-import.json",
+            json.dumps(packet_import, indent=2, sort_keys=True).encode() + b"\n",
+        )
+        log.append("packet_reviews_imported", **packet_import)
+
     summary: dict[str, Any] = {
         "runId": run_id, "runDirectory": str(run_dir), "live": live,
         "status": "planned" if not live else "running", "candidateSha256": candidate_sha256,
         "sourceRunId": source_run_id, "packets": packet_records,
+        "reviewAttemptCounts": review_attempt_counts,
     }
     try:
         if not live:
@@ -455,19 +520,31 @@ def run_defect_inventory(
                 for packet in packet_values:
                     packet_reviews: dict[str, dict[str, Any]] = {}
                     for reviewer in task["reviewers"]:
-                        review = _invoke(
-                            agent=reviewer, snapshot=snapshot,
-                            prompt=_packet_review_prompt(
-                                reviewer=reviewer, packet=packet, packet_text=packet["text"],
-                                packet_hash=packet["sha256"], candidate_hash=candidate_sha256,
-                                traceability=traceability, known_finding=known,
-                            ),
-                            schema_path=root / "schemas" / "packet-review-result.schema.json",
-                            validator=validate_packet_review,
-                            prefix=run_dir / "packets" / packet["id"] / f"review-{reviewer}",
-                            timeout_seconds=task["timeoutSeconds"], max_turns=task["reviewerMaxTurns"],
-                            log=log,
-                        )
+                        if reviewer in imported_reviews.get(packet["id"], {}):
+                            review = imported_reviews[packet["id"]][reviewer]
+                            write_once(
+                                run_dir / "packets" / packet["id"] / f"review-{reviewer}-import.json",
+                                json.dumps(review, indent=2, sort_keys=True).encode() + b"\n",
+                            )
+                        else:
+                            key = f"{packet['id']}/{reviewer}"
+                            attempts = review_attempt_counts.get(key, 0)
+                            if attempts >= 2:
+                                raise ConductorError(f"{key} exhausted its two bounded attempts")
+                            review_attempt_counts[key] = attempts + 1
+                            review = _invoke(
+                                agent=reviewer, snapshot=snapshot,
+                                prompt=_packet_review_prompt(
+                                    reviewer=reviewer, packet=packet, packet_text=packet["text"],
+                                    packet_hash=packet["sha256"], candidate_hash=candidate_sha256,
+                                    traceability=traceability, known_finding=known,
+                                ),
+                                schema_path=root / "schemas" / "packet-review-result.schema.json",
+                                validator=validate_packet_review,
+                                prefix=run_dir / "packets" / packet["id"] / f"review-{reviewer}",
+                                timeout_seconds=task["timeoutSeconds"], max_turns=task["reviewerMaxTurns"],
+                                log=log,
+                            )
                         if review["candidateSha256"] != candidate_sha256:
                             raise ConductorError(f"{reviewer} packet review targets the wrong candidate")
                         if review["packetId"] != packet["id"] or review["packetSha256"] != packet["sha256"]:

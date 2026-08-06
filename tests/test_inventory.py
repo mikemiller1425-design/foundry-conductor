@@ -139,16 +139,49 @@ class InventoryTests(unittest.TestCase):
             for definition in PACKETS:
                 text = _packet_text(candidate, definition["ranges"])
                 packet_records.append({**definition, "sha256": hashlib.sha256(text.encode()).hexdigest()})
+            review_resume_id = "20260101T000002Z-package-2a-defect-inventory-cdef1234"
+            review_resume_dir = root / "runs" / review_resume_id
+            (review_resume_dir / "summary.json").parent.mkdir(parents=True)
+            (review_resume_dir / "summary.json").write_text(json.dumps({
+                "candidateSha256": candidate_hash,
+                "sourceUnchanged": True,
+                "snapshotClean": True,
+                "reviewAttemptCounts": {},
+            }), encoding="utf-8")
+            passing_reviews = {
+                ("hashing-identity", "codex"),
+                ("hashing-identity", "cursor"),
+                ("coverage-truth", "codex"),
+            }
+            for packet in packet_records:
+                packet_dir = review_resume_dir / "packets" / packet["id"]
+                packet_dir.mkdir(parents=True)
+                (packet_dir / "manifest.json").write_text(json.dumps({
+                    "candidateSha256": candidate_hash,
+                    "packetSha256": packet["sha256"],
+                }), encoding="utf-8")
+                for reviewer in ("codex", "cursor"):
+                    if (packet["id"], reviewer) in passing_reviews:
+                        (packet_dir / f"review-{reviewer}.normalized.json").write_text(json.dumps({
+                            "verdict": "pass", "candidateSha256": candidate_hash,
+                            "packetId": packet["id"], "packetSha256": packet["sha256"],
+                            "summary": "complete", "findings": [], "requiresHuman": False,
+                        }), encoding="utf-8")
+            (review_resume_dir / "packets" / "coverage-truth" / "review-cursor.stdout").write_text(
+                "invalid", encoding="utf-8"
+            )
             with patch("foundry_conductor.inventory._invoke", side_effect=invoke_side_effect):
                 result = run_defect_inventory(
                     root=root, task_path=task_path, source_run_id=run_id,
                     candidate_sha256=candidate_hash, live=True, live_confirmed=True,
                     traceability_run_id=trace_id,
+                    packet_review_run_id=review_resume_id,
                 )
             self.assertEqual("ready_for_operator_decision", result["status"])
-            self.assertEqual(10, len(calls))
+            self.assertEqual(7, len(calls))
             self.assertEqual(0, sum(1 for agent, _ in calls if agent == "claude"))
-            self.assertEqual(5, sum(1 for agent, _ in calls if agent == "cursor"))
+            self.assertEqual(4, sum(1 for agent, _ in calls if agent == "cursor"))
+            self.assertEqual(2, result["reviewAttemptCounts"]["coverage-truth/cursor"])
             inventory = json.loads(
                 (Path(result["runDirectory"]) / "final" / "defect-inventory.json").read_text()
             )
