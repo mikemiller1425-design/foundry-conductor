@@ -40,6 +40,7 @@ def validate_reconciliation_task(task: dict[str, Any]) -> None:
         "reviewers",
         "maxRounds",
         "authorMaxTurns",
+        "reviewerMaxTurns",
         "timeoutSeconds",
         "objective",
         "authoritativeSources",
@@ -68,6 +69,8 @@ def validate_reconciliation_task(task: dict[str, Any]) -> None:
         raise ConductorError("maxRounds must be between 1 and 3")
     if not isinstance(task["authorMaxTurns"], int) or not 1 <= task["authorMaxTurns"] <= 20:
         raise ConductorError("authorMaxTurns must be between 1 and 20")
+    if not isinstance(task["reviewerMaxTurns"], int) or not 1 <= task["reviewerMaxTurns"] <= 20:
+        raise ConductorError("reviewerMaxTurns must be between 1 and 20")
     if not isinstance(task["timeoutSeconds"], int) or not 1 <= task["timeoutSeconds"] <= 3600:
         raise ConductorError("timeoutSeconds must be between 1 and 3600")
     if not isinstance(task["authoritativeSources"], list) or not task["authoritativeSources"]:
@@ -318,12 +321,13 @@ def run_reconciliation(
     live_confirmed: bool,
     seed_run_id: str | None = None,
     reviewed_run_id: str | None = None,
+    partial_run_id: str | None = None,
 ) -> dict[str, Any]:
     task = load_json(task_path)
     validate_reconciliation_task(task)
     if live and not live_confirmed:
         raise ConductorError("live reconciliation requires --confirm-live-models")
-    if seed_run_id is not None and reviewed_run_id is not None:
+    if sum(value is not None for value in (seed_run_id, reviewed_run_id, partial_run_id)) > 1:
         raise ConductorError("choose only one resume source")
 
     source_repo = Path(task["sourceRepository"]).expanduser().resolve()
@@ -356,6 +360,8 @@ def run_reconciliation(
     feedback: list[dict[str, Any]] = []
     seed_manifest: dict[str, Any] | None = None
     resume_manifest: dict[str, Any] | None = None
+    partial_manifest: dict[str, Any] | None = None
+    partial_state: dict[str, Any] | None = None
     start_round = 1
 
     if seed_run_id is not None:
@@ -446,6 +452,69 @@ def run_reconciliation(
         summary["rounds"] = completed_rounds
         log.append("reviewed_round_imported", **resume_manifest)
 
+    if partial_run_id is not None:
+        if not re.fullmatch(r"[0-9]{8}T[0-9]{6}Z-[a-z0-9-]+-[0-9a-f]{8}", partial_run_id):
+            raise ConductorError("partial run id is invalid")
+        partial_dir = (root / "runs" / partial_run_id).resolve()
+        if partial_dir.parent != (root / "runs").resolve() or not partial_dir.is_dir():
+            raise ConductorError(f"partial run does not exist: {partial_run_id}")
+        partial_task = load_json(partial_dir / "task.json")
+        partial_summary = load_json(partial_dir / "summary.json")
+        if partial_task.get("expectedHead") != task["expectedHead"]:
+            raise ConductorError("partial run used a different Foundry baseline")
+        if partial_summary.get("sourceUnchanged") is not True or partial_summary.get("snapshotClean") is not True:
+            raise ConductorError("partial run did not preserve its source and snapshot boundaries")
+        completed_rounds = partial_summary.get("rounds")
+        if not isinstance(completed_rounds, list):
+            raise ConductorError("partial run rounds are invalid")
+        last_completed = completed_rounds[-1]["round"] if completed_rounds else 0
+        start_round = last_completed + 1
+        if not 1 <= start_round <= task["maxRounds"]:
+            raise ConductorError("partial run has no resumable in-progress round")
+        partial_round_dir = partial_dir / f"round-{start_round:02d}"
+        author_path = partial_round_dir / "author-claude.normalized.json"
+        candidate_path = partial_round_dir / "candidate.md"
+        if not author_path.is_file() or not candidate_path.is_file():
+            raise ConductorError("partial run has no completed author draft in its next round")
+        imported_author = validate_draft_response(load_json(author_path))
+        if imported_author["status"] != "drafted":
+            raise ConductorError("partial run author did not produce a draft")
+        prior_draft = candidate_path.read_text(encoding="utf-8")
+        if sha256_bytes(prior_draft.encode()) != sha256_bytes(
+            (imported_author["draft"].strip() + "\n").encode()
+        ):
+            raise ConductorError("partial run candidate does not match its author response")
+        imported_reviews: dict[str, Any] = {}
+        for reviewer in task["reviewers"]:
+            review_path = partial_round_dir / f"review-{reviewer}.normalized.json"
+            if not review_path.is_file():
+                continue
+            review = validate_review_response(load_json(review_path))
+            if review["draftSha256"] != sha256_bytes(prior_draft.encode()):
+                raise ConductorError(f"partial run {reviewer} verdict targets the wrong draft")
+            imported_reviews[reviewer] = review
+        if len(imported_reviews) == len(task["reviewers"]):
+            raise ConductorError("partial run already completed all reviews")
+        partial_state = {
+            "round": start_round,
+            "author": imported_author,
+            "draft": prior_draft,
+            "reviews": imported_reviews,
+        }
+        partial_manifest = {
+            "partialRunId": partial_run_id,
+            "inProgressRound": start_round,
+            "draftSha256": sha256_bytes(prior_draft.encode()),
+            "importedReviewers": sorted(imported_reviews),
+        }
+        write_once(
+            run_dir / "partial-resume.json",
+            json.dumps(partial_manifest, indent=2, sort_keys=True).encode() + b"\n",
+        )
+        summary["partialResume"] = partial_manifest
+        summary["rounds"] = completed_rounds
+        log.append("partial_round_imported", **partial_manifest)
+
     try:
         if not live:
             prompt = author_prompt(
@@ -470,7 +539,14 @@ def run_reconciliation(
         else:
             for round_number in range(start_round, task["maxRounds"] + 1):
                 round_dir = run_dir / f"round-{round_number:02d}"
-                if round_number == 1 and prior_draft is not None and not feedback:
+                if partial_state is not None and round_number == partial_state["round"]:
+                    author = partial_state["author"]
+                    draft = partial_state["draft"]
+                    write_once(
+                        round_dir / "author-import.json",
+                        json.dumps(author, indent=2, sort_keys=True).encode() + b"\n",
+                    )
+                elif round_number == 1 and prior_draft is not None and not feedback:
                     author = {
                         "status": "drafted",
                         "draft": prior_draft,
@@ -506,23 +582,30 @@ def run_reconciliation(
                 write_once(round_dir / "candidate.md", draft.encode())
                 reviews: dict[str, Any] = {}
                 for reviewer in task["reviewers"]:
-                    review = _invoke(
-                        agent=reviewer,
-                        snapshot=snapshot,
-                        prompt=reviewer_prompt(
-                            task,
-                            reviewer=reviewer,
-                            round_number=round_number,
-                            draft=draft,
-                            draft_sha256=draft_hash,
-                        ),
-                        schema_path=review_schema,
-                        validator=validate_review_response,
-                        prefix=round_dir / f"review-{reviewer}",
-                        timeout_seconds=task["timeoutSeconds"],
-                        max_turns=8,
-                        log=log,
-                    )
+                    if partial_state is not None and reviewer in partial_state["reviews"]:
+                        review = partial_state["reviews"][reviewer]
+                        write_once(
+                            round_dir / f"review-{reviewer}-import.json",
+                            json.dumps(review, indent=2, sort_keys=True).encode() + b"\n",
+                        )
+                    else:
+                        review = _invoke(
+                            agent=reviewer,
+                            snapshot=snapshot,
+                            prompt=reviewer_prompt(
+                                task,
+                                reviewer=reviewer,
+                                round_number=round_number,
+                                draft=draft,
+                                draft_sha256=draft_hash,
+                            ),
+                            schema_path=review_schema,
+                            validator=validate_review_response,
+                            prefix=round_dir / f"review-{reviewer}",
+                            timeout_seconds=task["timeoutSeconds"],
+                            max_turns=task["reviewerMaxTurns"],
+                            log=log,
+                        )
                     if review["draftSha256"] != draft_hash:
                         raise ConductorError(
                             f"{reviewer} reviewed the wrong draft: {review['draftSha256']}"
@@ -562,6 +645,8 @@ def run_reconciliation(
                         final_manifest["seedRunId"] = seed_run_id
                     if reviewed_run_id is not None:
                         final_manifest["reviewedRunId"] = reviewed_run_id
+                    if partial_run_id is not None:
+                        final_manifest["partialRunId"] = partial_run_id
                     write_once(
                         final_dir / "manifest.json",
                         json.dumps(final_manifest, indent=2, sort_keys=True).encode() + b"\n",

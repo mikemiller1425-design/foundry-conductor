@@ -64,6 +64,7 @@ class ReconciliationTests(unittest.TestCase):
             "reviewers": ["codex", "cursor"],
             "maxRounds": 3,
             "authorMaxTurns": 5,
+            "reviewerMaxTurns": 5,
             "timeoutSeconds": 30,
             "objective": "Draft only.",
             "authoritativeSources": ["governance.md"],
@@ -331,6 +332,51 @@ class ReconciliationTests(unittest.TestCase):
             self.assertEqual(3, invoked.call_count)
             self.assertEqual(reviewed_id, result["reviewedRunId"])
             self.assertEqual([1, 2], [entry["round"] for entry in result["rounds"]])
+
+    def test_partial_resume_invokes_only_missing_review(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            repo = self.make_repo(root)
+            task = self.make_task(repo)
+            task_path = self.write_task(root, task)
+            partial_id = "20260101T000000Z-test-reconciliation-abcdef12"
+            partial_dir = root / "runs" / partial_id
+            round_dir = partial_dir / "round-01"
+            round_dir.mkdir(parents=True)
+            (partial_dir / "task.json").write_text(json.dumps(task), encoding="utf-8")
+            (partial_dir / "summary.json").write_text(
+                json.dumps({"sourceUnchanged": True, "snapshotClean": True, "rounds": []}),
+                encoding="utf-8",
+            )
+            draft = "partially reviewed draft"
+            draft_hash = digest(draft)
+            author = {"status": "drafted", "draft": draft, "notes": [], "requiresHuman": False}
+            passing = {
+                "verdict": "pass",
+                "draftSha256": draft_hash,
+                "summary": "pass",
+                "findings": [],
+                "requiresHuman": False,
+            }
+            (round_dir / "author-claude.normalized.json").write_text(
+                json.dumps(author), encoding="utf-8"
+            )
+            (round_dir / "candidate.md").write_text(draft.strip() + "\n", encoding="utf-8")
+            (round_dir / "review-codex.normalized.json").write_text(
+                json.dumps(passing), encoding="utf-8"
+            )
+            with patch("foundry_conductor.reconcile._invoke", return_value=passing) as invoked:
+                result = run_reconciliation(
+                    root=root,
+                    task_path=task_path,
+                    live=True,
+                    live_confirmed=True,
+                    partial_run_id=partial_id,
+                )
+            self.assertEqual("ready_for_operator_decision", result["status"])
+            self.assertEqual(1, invoked.call_count)
+            self.assertEqual("cursor", invoked.call_args.kwargs["agent"])
+            self.assertEqual(partial_id, result["partialRunId"])
 
     def test_cursor_invocation_records_and_sends_schema(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:
