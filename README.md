@@ -66,6 +66,11 @@ cd /Users/macmini/Documents/GitHub/foundry-conductor
 # Packetized exhaustive defect inventory; never revises or issues the candidate.
 ./foundryctl inventory --live --confirm-live-models \
   --from-run <prior-run-id> --candidate-sha256 <sha256>
+
+# Resume packet reviews from a preserved matrix response without recalling Claude.
+./foundryctl inventory --live --confirm-live-models \
+  --from-run <candidate-run-id> --candidate-sha256 <sha256> \
+  --resume-traceability-from <inventory-run-id>
 ```
 
 Run evidence is stored under `runs/<run-id>/`:

@@ -107,6 +107,10 @@ def build_parser() -> argparse.ArgumentParser:
     )
     inventory_parser.add_argument("--from-run", required=True, metavar="RUN_ID")
     inventory_parser.add_argument("--candidate-sha256", required=True)
+    inventory_parser.add_argument(
+        "--resume-traceability-from", metavar="RUN_ID",
+        help="import a preserved schema-valid Claude matrix without invoking Claude again",
+    )
     inventory_parser.add_argument("--live", action="store_true")
     inventory_parser.add_argument("--confirm-live-models", action="store_true")
     return parser
@@ -126,6 +130,7 @@ def main(argv: list[str] | None = None) -> int:
                 candidate_sha256=args.candidate_sha256,
                 live=args.live,
                 live_confirmed=args.confirm_live_models,
+                traceability_run_id=args.resume_traceability_from,
             )
             print(json.dumps(result, indent=2, sort_keys=True))
             return 0 if result["status"] in {"planned", "ready_for_operator_decision"} else 3

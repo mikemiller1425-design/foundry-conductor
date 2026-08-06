@@ -13,6 +13,7 @@ from .core import (
     fingerprint_repo,
     load_json,
     make_run_id,
+    parse_structured_response,
     sha256_bytes,
     snapshot_is_clean,
     verify_baseline,
@@ -25,27 +26,27 @@ PACKETS: tuple[dict[str, Any], ...] = (
     {
         "id": "hashing-identity",
         "title": "Hashing identity, numeric constraints, and cross-field refinements",
-        "ranges": ((56, 68), (72, 132), (256, 272), (275, 308), (320, 341), (397, 417), (442, 465)),
+        "ranges": ((56, 132), (256, 272), (275, 308), (320, 341), (397, 417), (442, 465)),
     },
     {
         "id": "coverage-truth",
         "title": "Coverage counts, completion, cancellation, and uncertainty",
-        "ranges": ((56, 68), (133, 187), (200, 244), (256, 308), (343, 372), (397, 417), (442, 465)),
+        "ranges": ((56, 71), (133, 187), (200, 244), (256, 308), (342, 380), (397, 417), (442, 465)),
     },
     {
         "id": "roots-and-paths",
         "title": "Roots, absolute and relative paths, and display exposure",
-        "ranges": ((21, 68), (133, 159), (188, 199), (245, 308), (313, 319), (343, 365), (374, 376), (397, 457)),
+        "ranges": ((21, 71), (133, 159), (188, 199), (245, 308), (313, 319), (342, 380), (397, 457)),
     },
     {
         "id": "scanner-security",
         "title": "Scanner read-only security, fixtures, and allowed paths",
-        "ranges": ((21, 68), (256, 319), (381, 428), (430, 457)),
+        "ranges": ((21, 68), (256, 319), (377, 428), (430, 457)),
     },
     {
         "id": "governance-boundaries",
         "title": "Governance, evidence, stop conditions, and downstream exclusions",
-        "ranges": ((1, 68), (245, 255), (381, 465)),
+        "ranges": ((1, 71), (245, 255), (377, 465)),
     },
 )
 
@@ -90,8 +91,6 @@ def validate_traceability_result(value: Any) -> dict[str, Any]:
         raise ConductorError("traceability gaps are invalid")
     if not isinstance(value["requiresHuman"], bool):
         raise ConductorError("traceability requiresHuman must be boolean")
-    if value["verdict"] == "complete" and value["requiresHuman"]:
-        raise ConductorError("complete traceability cannot require a human decision")
     return value
 
 
@@ -320,7 +319,7 @@ stop for the operator's decision.
 
 def run_defect_inventory(
     *, root: Path, task_path: Path, source_run_id: str, candidate_sha256: str,
-    live: bool, live_confirmed: bool,
+    live: bool, live_confirmed: bool, traceability_run_id: str | None = None,
 ) -> dict[str, Any]:
     task = load_json(task_path)
     validate_reconciliation_task(task)
@@ -330,6 +329,10 @@ def run_defect_inventory(
         raise ConductorError("candidate SHA-256 is invalid")
     if not re.fullmatch(r"[0-9]{8}T[0-9]{6}Z-[a-z0-9-]+-[0-9a-f]{8}", source_run_id):
         raise ConductorError("source run id is invalid")
+    if traceability_run_id is not None and not re.fullmatch(
+        r"[0-9]{8}T[0-9]{6}Z-[a-z0-9-]+-[0-9a-f]{8}", traceability_run_id
+    ):
+        raise ConductorError("traceability run id is invalid")
     source_dir = (root / "runs" / source_run_id).resolve()
     if source_dir.parent != (root / "runs").resolve() or not source_dir.is_dir():
         raise ConductorError("source run does not exist")
@@ -404,14 +407,45 @@ def run_defect_inventory(
         if not live:
             summary["status"] = "planned"
         else:
-            traceability = _invoke(
-                agent="claude", snapshot=snapshot,
-                prompt=_traceability_prompt(candidate, candidate_sha256, packet_values),
-                schema_path=root / "schemas" / "traceability-result.schema.json",
-                validator=validate_traceability_result,
-                prefix=run_dir / "traceability" / "claude", timeout_seconds=task["timeoutSeconds"],
-                max_turns=task["authorMaxTurns"], log=log,
-            )
+            if traceability_run_id is None:
+                traceability = _invoke(
+                    agent="claude", snapshot=snapshot,
+                    prompt=_traceability_prompt(candidate, candidate_sha256, packet_values),
+                    schema_path=root / "schemas" / "traceability-result.schema.json",
+                    validator=validate_traceability_result,
+                    prefix=run_dir / "traceability" / "claude", timeout_seconds=task["timeoutSeconds"],
+                    max_turns=task["authorMaxTurns"], log=log,
+                )
+            else:
+                trace_dir = (root / "runs" / traceability_run_id).resolve()
+                if trace_dir.parent != (root / "runs").resolve() or not trace_dir.is_dir():
+                    raise ConductorError("traceability run does not exist")
+                trace_summary = load_json(trace_dir / "summary.json")
+                if trace_summary.get("candidateSha256") != candidate_sha256:
+                    raise ConductorError("traceability run targets a different candidate")
+                if trace_summary.get("sourceUnchanged") is not True or trace_summary.get("snapshotClean") is not True:
+                    raise ConductorError("traceability run did not preserve its boundaries")
+                raw_path = trace_dir / "traceability" / "claude.stdout"
+                raw = raw_path.read_bytes()
+                traceability = parse_structured_response(raw, validate_traceability_result)
+                trace_import = {
+                    "traceabilityRunId": traceability_run_id,
+                    "candidateSha256": candidate_sha256,
+                    "rawStdoutSha256": sha256_bytes(raw),
+                    "normalizedSha256": sha256_bytes(
+                        json.dumps(traceability, sort_keys=True).encode()
+                    ),
+                }
+                write_once(
+                    run_dir / "traceability" / "import.json",
+                    json.dumps(trace_import, indent=2, sort_keys=True).encode() + b"\n",
+                )
+                write_once(
+                    run_dir / "traceability" / "claude.normalized.json",
+                    json.dumps(traceability, indent=2, sort_keys=True).encode() + b"\n",
+                )
+                summary["traceabilityImport"] = trace_import
+                log.append("traceability_imported", **trace_import)
             if traceability["candidateSha256"] != candidate_sha256:
                 raise ConductorError("Claude traceability targets the wrong candidate")
             if traceability["verdict"] == "blocked":

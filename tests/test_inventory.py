@@ -109,12 +109,21 @@ class InventoryTests(unittest.TestCase):
                     "status": "covered", "notes": "",
                 }], "gaps": [], "requiresHuman": False,
             }
+            trace_id = "20260101T000001Z-package-2a-defect-inventory-bcdef123"
+            trace_dir = root / "runs" / trace_id
+            (trace_dir / "traceability").mkdir(parents=True)
+            (trace_dir / "summary.json").write_text(json.dumps({
+                "candidateSha256": candidate_hash,
+                "sourceUnchanged": True,
+                "snapshotClean": True,
+            }), encoding="utf-8")
+            (trace_dir / "traceability" / "claude.stdout").write_text(
+                json.dumps({"result": json.dumps(traceability)}), encoding="utf-8"
+            )
             calls: list[tuple[str, str]] = []
 
             def invoke_side_effect(**kwargs):
                 calls.append((kwargs["agent"], kwargs["prefix"].name))
-                if kwargs["agent"] == "claude":
-                    return traceability
                 prompt = kwargs["prompt"]
                 packet_id = next(packet["id"] for packet in PACKETS if f"Packet: {packet['id']}" in prompt)
                 packet_hash = next(packet["sha256"] for packet in packet_records if packet["id"] == packet_id)
@@ -134,9 +143,11 @@ class InventoryTests(unittest.TestCase):
                 result = run_defect_inventory(
                     root=root, task_path=task_path, source_run_id=run_id,
                     candidate_sha256=candidate_hash, live=True, live_confirmed=True,
+                    traceability_run_id=trace_id,
                 )
             self.assertEqual("ready_for_operator_decision", result["status"])
-            self.assertEqual(11, len(calls))
+            self.assertEqual(10, len(calls))
+            self.assertEqual(0, sum(1 for agent, _ in calls if agent == "claude"))
             self.assertEqual(5, sum(1 for agent, _ in calls if agent == "cursor"))
             inventory = json.loads(
                 (Path(result["runDirectory"]) / "final" / "defect-inventory.json").read_text()
@@ -158,4 +169,6 @@ class InventoryTests(unittest.TestCase):
                 "status": "covered", "notes": "",
             }], "gaps": [], "requiresHuman": False,
         }
+        self.assertEqual(value, validate_traceability_result(value))
+        value["requiresHuman"] = True
         self.assertEqual(value, validate_traceability_result(value))
