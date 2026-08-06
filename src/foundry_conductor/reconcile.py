@@ -582,7 +582,11 @@ def run_reconciliation(
                 write_once(round_dir / "candidate.md", draft.encode())
                 reviews: dict[str, Any] = {}
                 for reviewer in task["reviewers"]:
-                    if partial_state is not None and reviewer in partial_state["reviews"]:
+                    if (
+                        partial_state is not None
+                        and round_number == partial_state["round"]
+                        and reviewer in partial_state["reviews"]
+                    ):
                         review = partial_state["reviews"][reviewer]
                         write_once(
                             round_dir / f"review-{reviewer}-import.json",

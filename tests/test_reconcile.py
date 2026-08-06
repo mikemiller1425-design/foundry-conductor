@@ -378,6 +378,81 @@ class ReconciliationTests(unittest.TestCase):
             self.assertEqual("cursor", invoked.call_args.kwargs["agent"])
             self.assertEqual(partial_id, result["partialRunId"])
 
+    def test_partial_imported_review_is_not_reused_on_next_draft(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            repo = self.make_repo(root)
+            task = self.make_task(repo)
+            task_path = self.write_task(root, task)
+            partial_id = "20260101T000000Z-test-reconciliation-abcdef12"
+            partial_dir = root / "runs" / partial_id
+            round_dir = partial_dir / "round-01"
+            round_dir.mkdir(parents=True)
+            (partial_dir / "task.json").write_text(json.dumps(task), encoding="utf-8")
+            (partial_dir / "summary.json").write_text(
+                json.dumps({"sourceUnchanged": True, "snapshotClean": True, "rounds": []}),
+                encoding="utf-8",
+            )
+            draft_one = "first draft"
+            hash_one = digest(draft_one)
+            (round_dir / "author-claude.normalized.json").write_text(
+                json.dumps(
+                    {"status": "drafted", "draft": draft_one, "notes": [], "requiresHuman": False}
+                ),
+                encoding="utf-8",
+            )
+            (round_dir / "candidate.md").write_text(draft_one + "\n", encoding="utf-8")
+            pass_one = {
+                "verdict": "pass",
+                "draftSha256": hash_one,
+                "summary": "pass",
+                "findings": [],
+                "requiresHuman": False,
+            }
+            (round_dir / "review-codex.normalized.json").write_text(
+                json.dumps(pass_one), encoding="utf-8"
+            )
+            revise_one = {
+                "verdict": "revise",
+                "draftSha256": hash_one,
+                "summary": "revise",
+                "findings": [
+                    {
+                        "severity": "error",
+                        "category": "contract",
+                        "message": "missing field",
+                        "requiredChange": "add it",
+                    }
+                ],
+                "requiresHuman": False,
+            }
+            draft_two = "second draft"
+            pass_two = {
+                "verdict": "pass",
+                "draftSha256": digest(draft_two),
+                "summary": "pass",
+                "findings": [],
+                "requiresHuman": False,
+            }
+            responses = [
+                revise_one,
+                {"status": "drafted", "draft": draft_two, "notes": [], "requiresHuman": False},
+                pass_two,
+                pass_two,
+            ]
+            with patch("foundry_conductor.reconcile._invoke", side_effect=responses) as invoked:
+                result = run_reconciliation(
+                    root=root,
+                    task_path=task_path,
+                    live=True,
+                    live_confirmed=True,
+                    partial_run_id=partial_id,
+                )
+            self.assertEqual("ready_for_operator_decision", result["status"])
+            self.assertEqual(["cursor", "claude", "codex", "cursor"], [
+                call.kwargs["agent"] for call in invoked.call_args_list
+            ])
+
     def test_cursor_invocation_records_and_sends_schema(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:
             root = Path(temporary)
