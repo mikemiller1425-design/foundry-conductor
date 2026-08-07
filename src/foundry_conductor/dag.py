@@ -245,7 +245,9 @@ def _stage_prompt(stage: dict[str, Any], handoff_hash: str, handoff_path: Path, 
     return f"""You are executing generic conductor stage `{stage['id']}` ({stage['type']}).
 {boundary}
 Do not access /Volumes, push, spend, perform external actions, run production, or invoke another model.
-You may execute only these exact commands: {json.dumps(stage.get('allowedCommands', []))}
+The provider adapter's sandboxed read-only file inspection tools are permitted for the workspace and
+handoff only. Manifest-authorized executable test commands (none means no test command):
+{json.dumps(stage.get('allowedCommands', []))}
 Inspectable handoff folder: {handoff_path}
 Canonical handoff SHA-256: {handoff_hash}
 Read every handoff file before work. Explicitly copy this digest into `handoffSha256` and set
