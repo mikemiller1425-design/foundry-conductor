@@ -10,7 +10,7 @@ from pathlib import Path
 from unittest.mock import patch
 
 from foundry_conductor.core import AgentCommand, ConductorError, fingerprint_repo, run_command as real_run_command
-from foundry_conductor.dag import _build_handoff, _materialize_workspace_seed, _workspace_patch, interact, run_dag, topological_order, validate_manifest, validate_stage_result
+from foundry_conductor.dag import _build_handoff, _create_workspace, _materialize_workspace_seed, _workspace_patch, interact, run_dag, topological_order, validate_manifest, validate_stage_result
 
 
 def command(repo: Path, *argv: str) -> None:
@@ -283,6 +283,14 @@ class DagTests(unittest.TestCase):
             changed, patch_bytes = _workspace_patch(repo)
             self.assertIn("new.txt", changed)
             self.assertIn(b"new model artifact", patch_bytes)
+
+    def test_workspace_copy_is_isolated_from_disposable_snapshot(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary); repo = self.repo(root); workspace = root / "workspace"
+            _create_workspace(repo, workspace)
+            (workspace / "README.md").write_text("workspace only\n")
+            self.assertEqual("fixture\n", (repo / "README.md").read_text())
+            self.assertEqual("workspace only\n", (workspace / "README.md").read_text())
 
     def test_canonical_dependency_diff_is_applied_before_context_copy(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:

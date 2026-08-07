@@ -380,7 +380,11 @@ def _input_manifest(stage: dict[str, Any], accepted: dict[str, dict[str, Any]]) 
 
 
 def _create_workspace(base_snapshot: Path, destination: Path) -> None:
-    run_command(["git", "clone", "-q", "--no-hardlinks", str(base_snapshot), str(destination)], cwd=base_snapshot.parent, timeout_seconds=120)
+    if destination.exists():
+        raise ConductorError(f"isolated workspace destination already exists: {destination}")
+    shutil.copytree(base_snapshot, destination, symlinks=True)
+    if not (destination / ".git").is_dir():
+        raise ConductorError(f"isolated workspace copy has no Git metadata: {destination}")
     exclude = destination / ".git" / "info" / "exclude"
     with exclude.open("a", encoding="utf-8") as handle:
         handle.write("\n.conductor/\n")
