@@ -1,0 +1,34 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "title": "Foundry Package 2a Final Revision Review",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["verdict", "draftSha256", "ledgerSha256", "confirmedDefectCount", "allDefectIdsPresentExactlyOnce", "allSubstantivelyResolved", "allProofsExecutable", "noBoundaryWeakened", "noNewFindings", "summary", "findings", "requiresHuman"],
+  "properties": {
+    "verdict": {"type": "string", "enum": ["pass", "fail", "blocked"]},
+    "draftSha256": {"type": "string", "pattern": "^[0-9a-f]{64}$"},
+    "ledgerSha256": {"type": "string", "pattern": "^[0-9a-f]{64}$"},
+    "confirmedDefectCount": {"type": "integer", "minimum": 0, "maximum": 89},
+    "allDefectIdsPresentExactlyOnce": {"type": "boolean"},
+    "allSubstantivelyResolved": {"type": "boolean"},
+    "allProofsExecutable": {"type": "boolean"},
+    "noBoundaryWeakened": {"type": "boolean"},
+    "noNewFindings": {"type": "boolean"},
+    "summary": {"type": "string", "minLength": 1},
+    "findings": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": ["defectId", "category", "message", "requiredChange"],
+        "properties": {
+          "defectId": {"type": ["string", "null"], "pattern": "^DEFECT-[0-9]{3}$"},
+          "category": {"type": "string", "minLength": 1},
+          "message": {"type": "string", "minLength": 1},
+          "requiredChange": {"type": "string", "minLength": 1}
+        }
+      }
+    },
+    "requiresHuman": {"type": "boolean"}
+  }
+}

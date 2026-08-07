@@ -7,6 +7,7 @@ from pathlib import Path
 
 from .core import ConductorError, doctor, execute_task, load_json
 from .inventory import run_defect_inventory
+from .final_revision import run_final_revision
 from .reconcile import run_reconciliation
 
 
@@ -121,6 +122,19 @@ def build_parser() -> argparse.ArgumentParser:
     )
     inventory_parser.add_argument("--live", action="store_true")
     inventory_parser.add_argument("--confirm-live-models", action="store_true")
+    final_parser = subcommands.add_parser(
+        "final-revision", help="run the bound Package 2a 89-defect final revision gate"
+    )
+    final_parser.add_argument(
+        "task", nargs="?", default="package-2a-authorization-reconciliation"
+    )
+    final_parser.add_argument("--from-run", required=True, metavar="RUN_ID")
+    final_parser.add_argument("--candidate-sha256", required=True)
+    final_parser.add_argument("--defect-inventory-sha256", required=True)
+    final_parser.add_argument("--proposed-authorization-sha256", required=True)
+    final_parser.add_argument("--resume-from", metavar="RUN_ID")
+    final_parser.add_argument("--live", action="store_true")
+    final_parser.add_argument("--confirm-live-models", action="store_true")
     return parser
 
 
@@ -130,6 +144,17 @@ def main(argv: list[str] | None = None) -> int:
     root = project_root()
     try:
         selected_task = task_path(root, args.task)
+        if args.command == "final-revision":
+            result = run_final_revision(
+                root=root, task_path=selected_task, source_run_id=args.from_run,
+                candidate_sha256=args.candidate_sha256,
+                defect_inventory_sha256=args.defect_inventory_sha256,
+                proposed_authorization_sha256=args.proposed_authorization_sha256,
+                live=args.live, live_confirmed=args.confirm_live_models,
+                resume_run_id=args.resume_from,
+            )
+            print(json.dumps(result, indent=2, sort_keys=True))
+            return 0 if result["status"] in {"planned", "ready_for_operator_decision"} else 3
         if args.command == "inventory":
             result = run_defect_inventory(
                 root=root,

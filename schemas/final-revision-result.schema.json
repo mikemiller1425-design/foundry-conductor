@@ -1,0 +1,50 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "title": "Foundry Package 2a Final Revision",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["status", "draft", "closureLedger", "notes", "requiresHuman"],
+  "properties": {
+    "status": {"type": "string", "enum": ["drafted", "blocked"]},
+    "draft": {"type": "string"},
+    "closureLedger": {
+      "type": "array",
+      "minItems": 89,
+      "maxItems": 89,
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": ["defectId", "status", "revisedDraftLocation", "closure", "explanation"],
+        "properties": {
+          "defectId": {"type": "string", "pattern": "^DEFECT-[0-9]{3}$"},
+          "status": {"type": "string", "enum": ["resolved", "unresolved"]},
+          "revisedDraftLocation": {"$ref": "#/$defs/location"},
+          "closure": {
+            "type": "object",
+            "additionalProperties": false,
+            "required": ["kind", "location"],
+            "properties": {
+              "kind": {"type": "string", "enum": ["contract", "invariant", "fixture", "proof", "gate", "stop_condition"]},
+              "location": {"$ref": "#/$defs/location"}
+            }
+          },
+          "explanation": {"type": "string", "minLength": 1, "maxLength": 800}
+        }
+      }
+    },
+    "notes": {"type": "array", "items": {"type": "string"}},
+    "requiresHuman": {"type": "boolean"}
+  },
+  "$defs": {
+    "location": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["lineStart", "lineEnd", "exactText"],
+      "properties": {
+        "lineStart": {"type": "integer", "minimum": 1},
+        "lineEnd": {"type": "integer", "minimum": 1},
+        "exactText": {"type": "string", "minLength": 1}
+      }
+    }
+  }
+}
