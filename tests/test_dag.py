@@ -152,6 +152,10 @@ class DagTests(unittest.TestCase):
             with patch("foundry_conductor.dag._build_stage_command") as reinvoke:
                 resumed = run_dag(root=root, manifest_path=path, live=True, live_confirmed=True, resume_run_id=first["runId"])
             reinvoke.assert_not_called(); self.assertEqual("complete", resumed["status"]); self.assertEqual(1, calls)
+            (Path(resumed["runDirectory"]) / "summary.json").unlink()
+            with patch("foundry_conductor.dag._build_stage_command") as third_call:
+                third = run_dag(root=root, manifest_path=path, live=True, live_confirmed=True, resume_run_id=resumed["runId"])
+            third_call.assert_not_called(); self.assertEqual("complete", third["status"]); self.assertEqual(1, calls)
 
     def test_write_path_violation_fails_closed(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:

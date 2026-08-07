@@ -594,10 +594,14 @@ def run_dag(*, root: Path, manifest_path: Path, live: bool, live_confirmed: bool
         preserved_hash = sha256_bytes(json.dumps(preserved_manifest, sort_keys=True, separators=(",", ":")).encode())
         if preserved_hash != manifest_hash:
             raise ConductorError("crash resume run uses a different generic manifest")
-        recovered_hashes = {
-            path.parent.name: sha256_bytes(path.read_bytes())
-            for path in sorted((resume_dir / "stages").glob("*/accepted.json"))
-        }
+        recovered_hashes: dict[str, str] = {}
+        for stage_dir in sorted((resume_dir / "stages").glob("*")):
+            forms = [path for path in (stage_dir / "accepted.json", stage_dir / "accepted-import.json") if path.is_file()]
+            if not forms:
+                continue
+            if len(forms) == 2 and forms[0].read_bytes() != forms[1].read_bytes():
+                raise ConductorError(f"crash resume accepted artifact forms conflict: {stage_dir.name}")
+            recovered_hashes[stage_dir.name] = sha256_bytes(forms[0].read_bytes())
         resume_summary = {"manifestSha256": manifest_hash, "acceptedRecordSha256": recovered_hashes}
         log.append("crash_resume_index_recovered", resumeRunId=resume_run_id, acceptedStages=sorted(recovered_hashes))
     if resume_summary is not None and resume_summary.get("manifestSha256") != manifest_hash:
@@ -608,8 +612,14 @@ def run_dag(*, root: Path, manifest_path: Path, live: bool, live_confirmed: bool
         if live:
             for stage_id in order:
                 stage = stage_by_id[stage_id]
-                prior = resume_dir / "stages" / stage_id / "accepted.json" if resume_dir else None
-                if prior is not None and prior.is_file():
+                prior = None
+                if resume_dir is not None:
+                    stage_resume_dir = resume_dir / "stages" / stage_id
+                    forms = [path for path in (stage_resume_dir / "accepted.json", stage_resume_dir / "accepted-import.json") if path.is_file()]
+                    if len(forms) == 2 and forms[0].read_bytes() != forms[1].read_bytes():
+                        raise ConductorError(f"resume accepted artifact forms conflict: {stage_id}")
+                    prior = forms[0] if forms else None
+                if prior is not None:
                     expected_record_hash = resume_summary.get("acceptedRecordSha256", {}).get(stage_id)
                     if expected_record_hash != sha256_bytes(prior.read_bytes()):
                         raise ConductorError(f"resume accepted artifact hash mismatch: {stage_id}")
