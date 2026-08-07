@@ -199,7 +199,7 @@ class DagTests(unittest.TestCase):
             artifact = root / "stages" / "producer" / "result.normalized.json"
             artifact.parent.mkdir(parents=True); artifact.write_text('{"summary":"readable"}\n')
             accepted = {"producer": {"stageId": "producer", "artifactSha256": "a" * 64, "artifactFiles": [str(artifact.relative_to(root))]}}
-            stage = {"id": "consumer", "dependsOn": ["producer"], "contextPaths": ["README.md"]}
+            stage = {"id": "consumer", "dependsOn": ["producer"], "contextPaths": ["README.md", "*.md"]}
             handoff, digest, manifest = _build_handoff(run_dir=root, workspace=workspace, stage=stage, accepted=accepted, instructions="inspect")
             self.assertEqual("fixture\n", (handoff / "context" / "README.md").read_text())
             self.assertIn("readable", (handoff / "dependencies" / "producer" / "artifacts" / artifact.name).read_text())

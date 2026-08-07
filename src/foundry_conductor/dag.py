@@ -432,11 +432,14 @@ def _build_handoff(
         write_once(target, data)
         files.append({"path": str(target.relative_to(handoff)), "sha256": attachment["sha256"]})
     tracked = [item.decode() for item in git(workspace, "ls-files", "--cached", "--others", "--exclude-standard", "-z").split(b"\0") if item]
+    copied_context: set[str] = set()
     for pattern in stage.get("contextPaths", []):
         matches = sorted(path for path in tracked if fnmatch.fnmatchcase(path, pattern))
         if not matches:
             raise ConductorError(f"handoff contextPath matched no tracked file: {pattern}")
         for relative in matches:
+            if relative in copied_context:
+                continue
             source = workspace / relative
             if not source.is_file() or source.is_symlink():
                 raise ConductorError(f"handoff context file is unsafe: {relative}")
@@ -444,6 +447,7 @@ def _build_handoff(
             data = source.read_bytes()
             write_once(target, data)
             files.append({"path": str(target.relative_to(handoff)), "sha256": sha256_bytes(data)})
+            copied_context.add(relative)
     manifest = {"stageId": stage["id"], "dependencies": stage["dependsOn"], "files": sorted(files, key=lambda item: item["path"])}
     digest = sha256_bytes(json.dumps(manifest, sort_keys=True, separators=(",", ":")).encode())
     manifest["handoffSha256"] = digest
