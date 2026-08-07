@@ -239,7 +239,10 @@ def _validate_recovery_policy(stage_id: str, policy: Any, parent_paths: list[str
 def _finish_reserve_seconds(stage: dict[str, Any]) -> int:
     if "finishReserveSeconds" in stage:
         return int(stage["finishReserveSeconds"])
-    return max(30, min(120, stage["timeoutSeconds"] // 10))
+    timeout = stage["timeoutSeconds"]
+    preferred = max(30, min(120, timeout // 10))
+    # Always leave at least half the stage budget for productive work.
+    return min(preferred, max(1, timeout // 2))
 
 
 def _work_budget_seconds(stage: dict[str, Any]) -> int:
@@ -631,6 +634,11 @@ def run_dag(*, root: Path, manifest_path: Path, live: bool, live_confirmed: bool
                         if decision.get("decision") == "refuse":
                             raise ConductorError(f"operator refused stage {stage_id}")
                         write_once(approval, json.dumps(decision, indent=2, sort_keys=True).encode() + b"\n")
+                    missing_required = [item for item in stage.get("requireAccepted", []) if item not in accepted]
+                    if missing_required:
+                        raise ConductorError(
+                            f"human_gate {stage_id} missing required accepted stages: {', '.join(missing_required)}"
+                        )
                     if not approval.is_file():
                         status = "waiting_for_approval"
                         log.append("human_gate_waiting", stageId=stage_id, gate=stage.get("gate", "custom"), inputArtifactSha256=input_hash)
@@ -641,19 +649,28 @@ def run_dag(*, root: Path, manifest_path: Path, live: bool, live_confirmed: bool
                     def invoke_agent(
                         active_stage: dict[str, Any], workspace: Path, handoff_path: Path,
                         handoff_hash: str, prefix: Path, feedback: list[dict[str, Any]] | None = None,
+                        *,
+                        timeout_seconds: int | None = None,
+                        diagnostic: dict[str, Any] | None = None,
+                        recovery_mode: str | None = None,
                         baseline_paths_override: list[str] | None = None,
                     ) -> dict[str, Any]:
                         baseline_paths = baseline_paths_override if baseline_paths_override is not None else _changed_paths(workspace)
+                        write_allowed = active_stage["type"] in {"implementation", "repair"}
                         prompt = _stage_prompt(
                             active_stage, handoff_hash, workspace / ".conductor" / "handoff",
-                            active_stage["type"] in {"implementation", "repair"}, feedback,
+                            write_allowed, feedback,
+                            diagnostic=diagnostic,
+                            finish_reserve_seconds=_finish_reserve_seconds(active_stage) if write_allowed else None,
+                            recovery_mode=recovery_mode,
                         )
                         command = _build_stage_command(active_stage, workspace, prompt, root / "schemas" / "generic-stage-result.schema.json")
                         write_once(prefix.with_suffix(".prompt.txt"), prompt.encode() + b"\n")
                         write_once(prefix.with_suffix(".command.json"), json.dumps(redact_command(command), indent=2, sort_keys=True).encode() + b"\n")
                         operation_id = active_stage["id"]
                         log.append("provider_work_started", stageId=stage_id, operationId=operation_id, provider=active_stage["provider"], handoffSha256=handoff_hash, workspace=str(workspace))
-                        completed = run_command(command.argv, cwd=workspace, timeout_seconds=active_stage["timeoutSeconds"], check=False)
+                        budget = timeout_seconds if timeout_seconds is not None else active_stage["timeoutSeconds"]
+                        completed = run_command(command.argv, cwd=workspace, timeout_seconds=budget, check=False)
                         write_once(prefix.with_suffix(".stdout"), completed.stdout)
                         write_once(prefix.with_suffix(".stderr"), completed.stderr)
                         if completed.returncode != 0:
@@ -676,33 +693,136 @@ def run_dag(*, root: Path, manifest_path: Path, live: bool, live_confirmed: bool
                         log.append("provider_completed", stageId=stage_id, operationId=operation_id, provider=active_stage["provider"], status=result["status"], findingCount=len(result["findings"]))
                         return result
 
-                    workspace = run_dir / "workspaces" / stage_id / "initial"
-                    _create_workspace(snapshot, workspace)
-                    handoff_path, handoff_hash, _ = _build_handoff(
-                        run_dir=run_dir, workspace=workspace, stage=stage, accepted=accepted,
-                        instructions=stage["prompt"],
-                    )
-                    _checkpoint_dependencies(workspace)
-                    workspace_baseline_paths = _changed_paths(workspace)
                     accepted_result = None
                     result = None
                     last_attempt_error = None
+                    last_diagnostic: dict[str, Any] | None = None
+                    workspace: Path | None = None
+                    handoff_hash = ""
+                    recovery_policy = stage.get("recoveryPolicy") if stage["type"] in {"implementation", "repair"} else None
+                    recovery_used = 0
+                    write_stage = stage["type"] in {"implementation", "repair"}
                     for attempt in range(1, stage["maxAttempts"] + 1):
+                        workspace = run_dir / "workspaces" / stage_id / f"attempt-{attempt:02d}"
+                        _create_workspace(snapshot, workspace)
+                        handoff_path, handoff_hash, _ = _build_handoff(
+                            run_dir=run_dir, workspace=workspace, stage=stage, accepted=accepted,
+                            instructions=stage["prompt"], suffix=f"-attempt-{attempt:02d}" if attempt > 1 else "",
+                        )
+                        _checkpoint_dependencies(workspace)
+                        workspace_baseline_paths = _changed_paths(workspace)
                         prefix = run_dir / "stages" / stage_id / f"attempt-{attempt:02d}"
-                        log.append("stage_attempt_started", stageId=stage_id, attempt=attempt, provider=stage["provider"], handoffSha256=handoff_hash)
+                        log.append(
+                            "stage_attempt_started",
+                            stageId=stage_id,
+                            attempt=attempt,
+                            provider=stage["provider"],
+                            handoffSha256=handoff_hash,
+                            workspace=str(workspace.relative_to(run_dir)),
+                            workBudgetSeconds=_work_budget_seconds(stage) if write_stage else stage["timeoutSeconds"],
+                            finishReserveSeconds=_finish_reserve_seconds(stage) if write_stage else 0,
+                        )
                         try:
-                            result = invoke_agent(stage, workspace, handoff_path, handoff_hash, prefix, baseline_paths_override=workspace_baseline_paths)
+                            result = invoke_agent(
+                                stage, workspace, handoff_path, handoff_hash, prefix,
+                                diagnostic=last_diagnostic if attempt > 1 else None,
+                                timeout_seconds=_work_budget_seconds(stage) if write_stage else stage["timeoutSeconds"],
+                                baseline_paths_override=workspace_baseline_paths,
+                            )
                             accepted_result = result
                             break
                         except ConductorError as exc:
                             last_attempt_error = str(exc)
                             log.append("stage_attempt_failed", stageId=stage_id, attempt=attempt, error=str(exc))
-                            if "outside allowedPaths" in str(exc) or "mutated its isolated workspace" in str(exc) or "wrong handoff" in str(exc):
+                            if _is_hard_attempt_failure(str(exc)):
                                 raise
+                            diagnostic = _preserve_diagnostic(
+                                run_dir=run_dir, stage_id=stage_id, attempt=attempt,
+                                workspace=workspace, reason=str(exc), handoff_hash=handoff_hash,
+                            )
+                            last_diagnostic = diagnostic
+                            log.append(
+                                "stage_diagnostic_preserved",
+                                stageId=stage_id,
+                                attempt=attempt,
+                                diagnosticSha256=diagnostic["diagnosticSha256"],
+                                changedPaths=diagnostic["changedPaths"],
+                                accepted=False,
+                            )
+                            recovered = False
+                            if recovery_policy and recovery_used < recovery_policy["maxAttempts"] and write_stage:
+                                recovery_used += 1
+                                mode = recovery_policy["mode"]
+                                log.append(
+                                    "stage_recovery_started",
+                                    stageId=stage_id,
+                                    attempt=attempt,
+                                    recoveryAttempt=recovery_used,
+                                    mode=mode,
+                                    diagnosticSha256=diagnostic["diagnosticSha256"],
+                                )
+                                if mode == "reject":
+                                    log.append(
+                                        "stage_recovery_rejected",
+                                        stageId=stage_id,
+                                        diagnosticSha256=diagnostic["diagnosticSha256"],
+                                        reason="recoveryPolicy.mode=reject",
+                                    )
+                                elif not _diagnostic_allowlist_clean(diagnostic, recovery_policy["allowedPaths"]):
+                                    log.append(
+                                        "stage_recovery_rejected",
+                                        stageId=stage_id,
+                                        diagnosticSha256=diagnostic["diagnosticSha256"],
+                                        reason="diagnostic paths outside recovery allowlist or empty",
+                                    )
+                                else:
+                                    try:
+                                        _verify_diagnostic_hash(workspace, diagnostic)
+                                        recovery_stage = dict(stage)
+                                        recovery_stage["maxTurns"] = recovery_policy.get("maxTurns", 5)
+                                        recovery_stage["timeoutSeconds"] = recovery_policy.get(
+                                            "timeoutSeconds", _finish_reserve_seconds(stage)
+                                        )
+                                        recovery_stage["allowedPaths"] = recovery_policy["allowedPaths"]
+                                        recovery_prefix = run_dir / "stages" / stage_id / f"attempt-{attempt:02d}-recovery-{recovery_used:02d}"
+                                        recovery_result = invoke_agent(
+                                            recovery_stage, workspace, handoff_path, handoff_hash, recovery_prefix,
+                                            diagnostic=diagnostic,
+                                            timeout_seconds=recovery_stage["timeoutSeconds"],
+                                            recovery_mode=mode,
+                                            baseline_paths_override=workspace_baseline_paths,
+                                        )
+                                        if recovery_result["status"] != "pass":
+                                            raise ConductorError("recovery completion did not pass")
+                                        changed = _changed_paths(workspace)
+                                        if not _paths_allowed(changed, recovery_policy["allowedPaths"]):
+                                            raise ConductorError("generic stage changed a path outside allowedPaths")
+                                        accepted_result = recovery_result
+                                        recovered = True
+                                        log.append(
+                                            "stage_recovery_accepted",
+                                            stageId=stage_id,
+                                            diagnosticSha256=diagnostic["diagnosticSha256"],
+                                            recoveryAttempt=recovery_used,
+                                        )
+                                    except ConductorError as recovery_exc:
+                                        log.append(
+                                            "stage_recovery_rejected",
+                                            stageId=stage_id,
+                                            diagnosticSha256=diagnostic["diagnosticSha256"],
+                                            reason=str(recovery_exc),
+                                        )
+                                        last_attempt_error = str(recovery_exc)
+                            if recovered:
+                                break
+                            continue
                     if accepted_result is None:
                         raise ConductorError(f"generic stage {stage_id} exhausted its bounded attempts: {last_attempt_error}")
 
-                    normalized_path = run_dir / "stages" / stage_id / f"attempt-{attempt:02d}.normalized.json"
+                    normalized_candidates = sorted((run_dir / "stages" / stage_id).glob("*.normalized.json"))
+                    if not normalized_candidates:
+                        raise ConductorError(f"generic stage {stage_id} missing normalized response artifact")
+                    normalized_path = normalized_candidates[-1]
                     artifact_files.append(str(normalized_path.relative_to(run_dir)))
                     repair_policy = stage.get("repairPolicy")
                     round_number = 0
@@ -757,6 +877,8 @@ def run_dag(*, root: Path, manifest_path: Path, live: bool, live_confirmed: bool
                         artifact_files.append(str(review_prefix.with_suffix(".normalized.json").relative_to(run_dir)))
                     if accepted_result["status"] != "pass":
                         raise ConductorError(f"generic stage {stage_id} did not reach pass")
+                    if workspace is None:
+                        raise ConductorError(f"generic stage {stage_id} missing active workspace")
                     active_workspace = workspace
                     changed, diff = _workspace_patch(active_workspace, accumulated=stage.get("emitAccumulatedDiff", False))
                     changed_path = run_dir / "stages" / stage_id / "changed-files.json"
@@ -773,9 +895,21 @@ def run_dag(*, root: Path, manifest_path: Path, live: bool, live_confirmed: bool
                     source_summary = load_json(source_run / "summary.json")
                     if source_summary.get("status") != "failed" or source_summary.get("sourceUnchanged") is not True:
                         raise ConductorError(f"workspace seed source run is not a safe failed run: {stage_id}")
-                    source_workspace = source_run / "workspaces" / stage["sourceStageId"] / "initial"
+                    source_attempt = stage.get("sourceAttempt", "initial")
+                    source_workspace = source_run / "workspaces" / stage["sourceStageId"] / source_attempt
                     if not source_workspace.is_dir():
                         raise ConductorError(f"workspace seed source workspace is missing: {stage_id}")
+                    if stage.get("expectedDiagnosticSha256"):
+                        marker = source_run / "workspaces" / stage["sourceStageId"] / f"{source_attempt}.diagnostic"
+                        diagnostic_path = source_run / "stages" / stage["sourceStageId"] / f"{source_attempt}.diagnostic.json"
+                        if not marker.is_file() or not diagnostic_path.is_file():
+                            raise ConductorError(f"workspace seed {stage_id} missing diagnostic evidence")
+                        diagnostic = load_json(diagnostic_path)
+                        if diagnostic.get("diagnosticSha256") != stage["expectedDiagnosticSha256"]:
+                            raise ConductorError(f"workspace seed {stage_id} diagnostic hash mismatch")
+                        if diagnostic.get("accepted") is not False:
+                            raise ConductorError(f"workspace seed {stage_id} diagnostic must be unaccepted")
+                        _verify_diagnostic_hash(source_workspace, diagnostic)
                     seed_workspace = run_dir / "workspaces" / stage_id / "seed"
                     changed, seed_patch = _materialize_workspace_seed(snapshot, source_workspace, seed_workspace)
                     if not _paths_allowed(changed, stage["allowedPaths"]):
@@ -789,7 +923,16 @@ def run_dag(*, root: Path, manifest_path: Path, live: bool, live_confirmed: bool
                     write_once(changed_path, json.dumps(changed, indent=2).encode() + b"\n")
                     artifact_files.extend([str(changed_path.relative_to(run_dir)), str(diff_path.relative_to(run_dir))])
                     payload = seed_patch
-                    log.append("workspace_seed_imported", stageId=stage_id, sourceRunId=stage["sourceRunId"], sourceStageId=stage["sourceStageId"], patchSha256=stage["expectedPatchSha256"], changedPaths=changed)
+                    log.append(
+                        "workspace_seed_imported",
+                        stageId=stage_id,
+                        sourceRunId=stage["sourceRunId"],
+                        sourceStageId=stage["sourceStageId"],
+                        sourceAttempt=source_attempt,
+                        patchSha256=stage["expectedPatchSha256"],
+                        diagnosticSha256=stage.get("expectedDiagnosticSha256"),
+                        changedPaths=changed,
+                    )
                 elif stage["type"] == "test":
                     test_workspace = run_dir / "workspaces" / stage_id / "test"
                     _create_workspace(snapshot, test_workspace)

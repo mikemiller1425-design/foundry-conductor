@@ -10,7 +10,10 @@ from pathlib import Path
 from unittest.mock import patch
 
 from foundry_conductor.core import AgentCommand, ConductorError, fingerprint_repo, run_command as real_run_command
-from foundry_conductor.dag import _build_handoff, _create_workspace, _materialize_workspace_seed, _workspace_patch, interact, run_dag, topological_order, validate_manifest, validate_stage_result
+from foundry_conductor.dag import (
+    _build_handoff, _create_workspace, _materialize_workspace_seed, _workspace_patch,
+    interact, run_dag, topological_order, validate_manifest, validate_stage_result,
+)
 
 
 def command(repo: Path, *argv: str) -> None:
@@ -407,6 +410,228 @@ class DagTests(unittest.TestCase):
             evidence = interact(root=root, run_id=planned["runId"], action="evidence")
             self.assertTrue(any(name.startswith("messages/") for name in evidence["files"]))
             self.assertIn("approvals/security-review.json", evidence["files"])
+
+    def test_timeout_preserves_diagnostic_and_retries_from_fresh_workspace(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary); repo = self.repo(root)
+            manifest = self.manifest(repo)
+            manifest["stages"] = [{
+                "id": "write", "type": "implementation", "role": "general", "dependsOn": [], "prompt": "write",
+                "allowedPaths": ["README.md"], "timeoutSeconds": 60, "maxAttempts": 2, "finishReserveSeconds": 10,
+                "recoveryPolicy": {"maxAttempts": 1, "mode": "reject", "allowedPaths": ["README.md"]},
+            }]
+            path = root / "manifest.json"; path.write_text(json.dumps(manifest))
+            calls = {"n": 0}
+            workspaces: list[str] = []
+            def build(stage, snapshot, prompt, schema): return AgentCommand("claude", "fake", ["fake", prompt])
+            def execute(argv, cwd, **kwargs):
+                if argv[0] == "git": return real_run_command(argv, cwd=cwd, **kwargs)
+                calls["n"] += 1
+                workspaces.append(str(cwd))
+                if calls["n"] == 1:
+                    (cwd / "README.md").write_text("partial unfinished work\n")
+                    raise ConductorError("command timed out after 50s: ['fake']")
+                digest = re.search(r"Canonical handoff SHA-256: ([0-9a-f]{64})", argv[1]).group(1)
+                self.assertIn("RETRY / RECOVERY CONSTRAINTS", argv[1])
+                self.assertIn("Do not rewrite already-validated accepted dependency artifacts", argv[1])
+                self.assertIn("partial unfinished work", (Path(workspaces[0]) / "README.md").read_text())
+                self.assertNotEqual(workspaces[0], workspaces[1])
+                (cwd / "README.md").write_text("complete\n")
+                value = {"status": "pass", "handoffSha256": digest, "workStarted": True, "summary": "done", "findings": [], "requiresHuman": False}
+                return subprocess.CompletedProcess(argv, 0, json.dumps(value).encode(), b"")
+            with patch("foundry_conductor.dag._build_stage_command", side_effect=build), patch("foundry_conductor.dag.run_command", side_effect=execute):
+                result = run_dag(root=root, manifest_path=path, live=True, live_confirmed=True)
+            self.assertEqual("complete", result["status"])
+            run_dir = Path(result["runDirectory"])
+            diagnostic = json.loads((run_dir / "stages" / "write" / "attempt-01.diagnostic.json").read_text())
+            self.assertFalse(diagnostic["accepted"])
+            self.assertEqual(["README.md"], diagnostic["changedPaths"])
+            self.assertTrue((run_dir / "workspaces" / "write" / "attempt-01.diagnostic").is_file())
+            self.assertFalse((run_dir / "stages" / "write" / "attempt-01.normalized.json").exists())
+            self.assertTrue((run_dir / "stages" / "write" / "accepted.json").is_file())
+            events = (run_dir / "events.jsonl").read_text()
+            self.assertIn('"event":"stage_diagnostic_preserved"', events)
+            self.assertIn('"event":"stage_recovery_rejected"', events)
+
+    def test_unaccepted_diagnostic_never_reaches_dependent_stage(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary); repo = self.repo(root)
+            manifest = self.manifest(repo)
+            manifest["stages"] = [
+                {"id": "contracts", "type": "implementation", "role": "general", "dependsOn": [], "prompt": "contracts",
+                 "allowedPaths": ["README.md"], "timeoutSeconds": 60, "maxAttempts": 1, "finishReserveSeconds": 10},
+                {"id": "scanner", "type": "implementation", "role": "general", "dependsOn": ["contracts"], "prompt": "scanner",
+                 "allowedPaths": ["README.md"], "timeoutSeconds": 60, "maxAttempts": 1, "finishReserveSeconds": 10},
+            ]
+            path = root / "manifest.json"; path.write_text(json.dumps(manifest))
+            invoked = []
+            def build(stage, snapshot, prompt, schema): return AgentCommand("claude", "fake", ["fake", stage["id"], prompt])
+            def execute(argv, cwd, **kwargs):
+                if argv[0] == "git": return real_run_command(argv, cwd=cwd, **kwargs)
+                invoked.append(argv[1])
+                (cwd / "README.md").write_text("partial\n")
+                raise ConductorError("command timed out after 50s: ['fake']")
+            with patch("foundry_conductor.dag._build_stage_command", side_effect=build), patch("foundry_conductor.dag.run_command", side_effect=execute):
+                result = run_dag(root=root, manifest_path=path, live=True, live_confirmed=True)
+            self.assertEqual("failed", result["status"])
+            self.assertEqual(["contracts"], invoked)
+            self.assertNotIn("contracts", result["acceptedStages"])
+            self.assertNotIn("scanner", result["acceptedStages"])
+            diagnostic = Path(result["runDirectory"]) / "stages" / "contracts" / "attempt-01.diagnostic.json"
+            self.assertTrue(diagnostic.is_file())
+            self.assertFalse(json.loads(diagnostic.read_text())["accepted"])
+
+    def test_accepted_checkpoints_are_not_reinvoked_on_resume(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary); repo = self.repo(root)
+            manifest = self.manifest(repo)
+            manifest["stages"] = [
+                {"id": "contracts", "type": "implementation", "role": "general", "dependsOn": [], "prompt": "contracts",
+                 "allowedPaths": ["README.md"], "timeoutSeconds": 60, "maxAttempts": 1, "finishReserveSeconds": 10},
+                {"id": "scanner", "type": "implementation", "role": "general", "dependsOn": ["contracts"], "prompt": "scanner",
+                 "allowedPaths": ["README.md"], "timeoutSeconds": 60, "maxAttempts": 1, "finishReserveSeconds": 10},
+            ]
+            path = root / "manifest.json"; path.write_text(json.dumps(manifest))
+            calls = {"contracts": 0, "scanner": 0}
+            allow_scanner = False
+            def build(stage, snapshot, prompt, schema): return AgentCommand("claude", "fake", ["fake", stage["id"], prompt])
+            def execute(argv, cwd, **kwargs):
+                nonlocal allow_scanner
+                if argv[0] == "git": return real_run_command(argv, cwd=cwd, **kwargs)
+                stage_id, prompt = argv[1], argv[2]
+                calls[stage_id] += 1
+                digest = re.search(r"Canonical handoff SHA-256: ([0-9a-f]{64})", prompt).group(1)
+                if stage_id == "scanner" and not allow_scanner:
+                    return subprocess.CompletedProcess(argv, 0, b"invalid", b"")
+                (cwd / "README.md").write_text(f"{stage_id}\n")
+                value = {"status": "pass", "handoffSha256": digest, "workStarted": True, "summary": stage_id, "findings": [], "requiresHuman": False}
+                return subprocess.CompletedProcess(argv, 0, json.dumps(value).encode(), b"")
+            with patch("foundry_conductor.dag._build_stage_command", side_effect=build), patch("foundry_conductor.dag.run_command", side_effect=execute):
+                first = run_dag(root=root, manifest_path=path, live=True, live_confirmed=True)
+                self.assertEqual("failed", first["status"])
+                self.assertEqual(["contracts"], first["acceptedStages"])
+                allow_scanner = True
+                second = run_dag(root=root, manifest_path=path, live=True, live_confirmed=True, resume_run_id=first["runId"])
+            self.assertEqual("complete", second["status"])
+            self.assertEqual(1, calls["contracts"])
+            self.assertEqual(2, calls["scanner"])
+
+    def test_recovery_is_hash_bound_and_can_accept_diagnostic(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary); repo = self.repo(root)
+            manifest = self.manifest(repo)
+            manifest["stages"] = [{
+                "id": "write", "type": "implementation", "role": "general", "dependsOn": [], "prompt": "write",
+                "allowedPaths": ["README.md"], "timeoutSeconds": 60, "maxAttempts": 1, "finishReserveSeconds": 10,
+                "recoveryPolicy": {"maxAttempts": 1, "mode": "completion-prompt", "timeoutSeconds": 20, "maxTurns": 3, "allowedPaths": ["README.md"]},
+            }]
+            path = root / "manifest.json"; path.write_text(json.dumps(manifest))
+            calls = {"n": 0}
+            def build(stage, snapshot, prompt, schema): return AgentCommand("claude", "fake", ["fake", prompt])
+            def execute(argv, cwd, **kwargs):
+                if argv[0] == "git": return real_run_command(argv, cwd=cwd, **kwargs)
+                calls["n"] += 1
+                digest = re.search(r"Canonical handoff SHA-256: ([0-9a-f]{64})", argv[1]).group(1)
+                if calls["n"] == 1:
+                    (cwd / "README.md").write_text("recoverable work\n")
+                    raise ConductorError("command timed out after 50s: ['fake']")
+                self.assertIn("FINISH-AND-RETURN NOW", argv[1])
+                self.assertIn("diagnosticSha256", argv[1])
+                value = {"status": "pass", "handoffSha256": digest, "workStarted": True, "summary": "recovered", "findings": [], "requiresHuman": False}
+                return subprocess.CompletedProcess(argv, 0, json.dumps(value).encode(), b"")
+            with patch("foundry_conductor.dag._build_stage_command", side_effect=build), patch("foundry_conductor.dag.run_command", side_effect=execute):
+                result = run_dag(root=root, manifest_path=path, live=True, live_confirmed=True)
+            self.assertEqual("complete", result["status"])
+            events = (Path(result["runDirectory"]) / "events.jsonl").read_text()
+            self.assertIn('"event":"stage_recovery_accepted"', events)
+            diagnostic = json.loads((Path(result["runDirectory"]) / "stages" / "write" / "attempt-01.diagnostic.json").read_text())
+            self.assertRegex(diagnostic["diagnosticSha256"], r"^[0-9a-f]{64}$")
+
+    def test_retries_cannot_widen_recovery_paths(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            value = self.manifest(self.repo(Path(temporary)))
+            value["stages"] = [{
+                "id": "write", "type": "implementation", "role": "general", "dependsOn": [], "prompt": "write",
+                "allowedPaths": ["README.md"], "timeoutSeconds": 60, "maxAttempts": 1,
+                "recoveryPolicy": {"maxAttempts": 1, "mode": "validate", "allowedPaths": ["README.md", "secrets.env"]},
+            }]
+            with self.assertRaisesRegex(ConductorError, "cannot widen stage allowlist"):
+                validate_manifest(value)
+            value["stages"][0]["provider"] = "cursor"
+            value["stages"][0].pop("recoveryPolicy", None)
+            with self.assertRaisesRegex(ConductorError, "Cursor may only run read-only"):
+                validate_manifest(value)
+
+    def test_final_gate_requires_every_checkpoint_test_and_review(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary); repo = self.repo(root)
+            (repo / ".gitignore").write_text(".cache/\n")
+            command(repo, "git", "add", ".gitignore")
+            command(repo, "git", "-c", "user.name=Test", "-c", "user.email=test@localhost", "commit", "-qm", "ignore")
+            manifest = self.manifest(repo)
+            manifest["stages"] = [
+                {"id": "contracts", "type": "implementation", "role": "general", "dependsOn": [], "prompt": "c",
+                 "allowedPaths": ["README.md"], "timeoutSeconds": 60, "maxAttempts": 1, "finishReserveSeconds": 10},
+                {"id": "review", "type": "review", "role": "governance", "dependsOn": ["contracts"], "prompt": "r",
+                 "timeoutSeconds": 30, "maxAttempts": 1},
+                {"id": "gate", "type": "test", "dependsOn": ["contracts", "review"], "command": ["true"],
+                 "allowedCommands": [["true"]], "timeoutSeconds": 30, "maxAttempts": 1},
+                {"id": "final-human-integration-gate", "type": "human_gate", "gate": "custom",
+                 "dependsOn": ["contracts", "review", "gate"],
+                 "requireAccepted": ["contracts", "review", "gate"],
+                 "timeoutSeconds": 30, "maxAttempts": 1},
+            ]
+            path = root / "manifest.json"; path.write_text(json.dumps(manifest))
+            validated = validate_manifest(json.loads(path.read_text()))
+            self.assertEqual(["contracts", "review", "gate"], validated["stages"][-1]["requireAccepted"])
+            def build(stage, snapshot, prompt, schema): return AgentCommand(stage.get("provider", "claude"), "fake", ["fake", stage["id"], prompt])
+            def execute(argv, cwd, **kwargs):
+                if argv[0] == "git": return real_run_command(argv, cwd=cwd, **kwargs)
+                if argv == ["true"]:
+                    return subprocess.CompletedProcess(argv, 0, b"", b"")
+                stage_id, prompt = argv[1], argv[2]
+                digest = re.search(r"Canonical handoff SHA-256: ([0-9a-f]{64})", prompt).group(1)
+                if stage_id == "contracts":
+                    (cwd / "README.md").write_text("contracts\n")
+                value = {"status": "pass", "handoffSha256": digest, "workStarted": True, "summary": stage_id, "findings": [], "requiresHuman": False}
+                return subprocess.CompletedProcess(argv, 0, json.dumps(value).encode(), b"")
+            with patch("foundry_conductor.dag._build_stage_command", side_effect=build), patch("foundry_conductor.dag.run_command", side_effect=execute):
+                waiting = run_dag(root=root, manifest_path=path, live=True, live_confirmed=True)
+            self.assertEqual("waiting_for_approval", waiting["status"])
+            self.assertEqual(["contracts", "review", "gate"], waiting["acceptedStages"])
+            bad = json.loads(path.read_text())
+            bad["stages"][-1]["requireAccepted"] = ["contracts", "review", "gate", "missing-stage"]
+            with self.assertRaisesRegex(ConductorError, "requireAccepted"):
+                validate_manifest(bad)
+            bad["stages"][-1]["requireAccepted"] = ["contracts"]
+            bad["stages"][-1]["dependsOn"] = ["review"]
+            with self.assertRaisesRegex(ConductorError, "subset of dependsOn"):
+                validate_manifest(bad)
+
+    def test_finish_reserve_is_injected_into_write_prompts(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary); repo = self.repo(root)
+            manifest = self.manifest(repo)
+            manifest["stages"] = [{
+                "id": "write", "type": "implementation", "role": "general", "dependsOn": [], "prompt": "write",
+                "allowedPaths": ["README.md"], "timeoutSeconds": 100, "maxAttempts": 1, "finishReserveSeconds": 20,
+            }]
+            path = root / "manifest.json"; path.write_text(json.dumps(manifest))
+            seen = {}
+            def build(stage, snapshot, prompt, schema):
+                seen["prompt"] = prompt
+                return AgentCommand("claude", "fake", ["fake", prompt])
+            def execute(argv, cwd, **kwargs):
+                if argv[0] == "git": return real_run_command(argv, cwd=cwd, **kwargs)
+                digest = re.search(r"Canonical handoff SHA-256: ([0-9a-f]{64})", argv[1]).group(1)
+                (cwd / "README.md").write_text("ok\n")
+                value = {"status": "pass", "handoffSha256": digest, "workStarted": True, "summary": "ok", "findings": [], "requiresHuman": False}
+                return subprocess.CompletedProcess(argv, 0, json.dumps(value).encode(), b"")
+            with patch("foundry_conductor.dag._build_stage_command", side_effect=build), patch("foundry_conductor.dag.run_command", side_effect=execute):
+                result = run_dag(root=root, manifest_path=path, live=True, live_confirmed=True)
+            self.assertEqual("complete", result["status"])
+            self.assertIn("Finish reserve seconds (schema serialization only): 20", seen["prompt"])
+            self.assertIn("Do not run package test suites", seen["prompt"])
 
 
 if __name__ == "__main__": unittest.main()

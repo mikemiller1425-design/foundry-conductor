@@ -10,6 +10,8 @@ def build_provider_command(
     response_schema: Path, max_turns: int,
 ) -> AgentCommand:
     """Provider-neutral adapter boundary used only by the generic DAG runner."""
+    if provider == "cursor" and mode == "controlled_write":
+        raise ValueError("Cursor may only run read-only reconnaissance or review stages")
     command = build_agent_command(
         provider, snapshot=snapshot, prompt=prompt,
         response_schema=response_schema, max_turns=max_turns,

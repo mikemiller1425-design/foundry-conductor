@@ -119,9 +119,25 @@ Set `workflow` to `generic_dag` and declare a DAG in `stages`. Dependencies are
 topologically ordered and their accepted artifact hashes are injected into the
 next stage automatically. Accepted stages are never invoked again on resume.
 
-Stage types are `reconnaissance`, `implementation`, `review`, `repair`, `test`,
-`commit`, and `human_gate`. Implementation and repair require `allowedPaths`;
-test requires an exact `command` also present in `allowedCommands`.
+Stage types are `reconnaissance`, `implementation`, `review`, `repair`,
+`workspace_seed`, `test`, `commit`, and `human_gate`. Implementation and repair
+require `allowedPaths`; test requires an exact `command` also present in
+`allowedCommands`.
+
+Large controlled-write work should be split into independently accepted
+checkpoints, each with its own narrow allowlist, timeout/retry budget, handoff
+digest, schema acknowledgement, changed-file manifest, patch, and accepted
+artifact hash. Soft failures (timeouts, invalid schema) preserve a diagnostic
+workspace and artifact hash that is never treated as accepted input. Retries
+always start from a fresh clone of the last accepted dependency baseline.
+Optional `recoveryPolicy` may reject a diagnostic, hash-verify it and issue a
+bounded completion prompt, or convert it only after allowlist-clean validation.
+Write stages reserve finish time for schema serialization (`finishReserveSeconds`)
+and instruct providers not to run package test suites; conductor `test` gates own
+formal verification. Cursor remains read-only (reconnaissance/review). Codex owns
+orchestration/security/patch review and routes repairs onto narrow Claude
+checkpoints. `human_gate` may declare `requireAccepted` so the final gate cannot
+pass unless every listed checkpoint, test gate, and review is accepted.
 
 Provider routing is adapter-neutral. A stage may set `provider` explicitly.
 Otherwise the role policy is:
@@ -158,7 +174,9 @@ status, hashes, and return codes in the final machine summary and decision sheet
 Use `tasks/generic-visible-acceptance.json` for the live read-only triad proof;
 it deliberately exercises one review-to-repair-to-rereview route and stops at an
 unapproved final integration gate. `tasks/foundry-next-batch-plan.json` is the
-prepared, non-executed Package 2a/2c dependency-correct dry-run plan.
+prepared Package 2a/2c plan split into independently accepted Claude checkpoints
+(contracts, scanner, fixtures/tests, evidence/docs), Cursor read-only preparation,
+narrow Codex reviews, conductor-owned evidence/final gates, and a final human gate.
 
 ## Profiles
 
@@ -193,7 +211,10 @@ PYTHONPATH=src python3 -m unittest discover -s tests -v
 The tests cover DAG order, provider roles, physical handoff content and digests,
 wrong or fake acknowledgements, missing artifacts, exact path and command
 policies, read-only mutation, empty controlled writes, review/repair routing,
-exhausted rounds, accepted-artifact resume, human-gate bypass, and source safety.
+exhausted rounds, accepted-artifact resume, human-gate bypass, source safety,
+timeout diagnostic preservation, unaccepted-work isolation, recovery hash
+binding, retry path non-widening, finish-reserve prompts, and final-gate
+`requireAccepted` enforcement.
 
 ## Human-only boundaries
 
