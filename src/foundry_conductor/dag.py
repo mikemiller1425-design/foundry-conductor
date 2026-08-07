@@ -27,6 +27,8 @@ DEFAULT_PROVIDERS = {
 AGENT_STAGE_TYPES = {"reconnaissance", "implementation", "review", "repair"}
 WRITE_STAGE_TYPES = {"implementation", "repair", "commit"}
 HIGH_RISK_PERMISSIONS = {"push", "nasAccess", "externalActions", "spending", "destructive", "productionExecution"}
+CURSOR_WRITE_FORBIDDEN = "Cursor may only run read-only reconnaissance or review stages"
+RECOVERY_MODES = {"reject", "validate", "completion-prompt"}
 
 
 def validate_stage_result(value: Any) -> dict[str, Any]:
@@ -84,7 +86,7 @@ def validate_manifest(value: Any) -> dict[str, Any]:
         if not re.fullmatch(r"[a-z0-9][a-z0-9-]{1,63}", str(stage["id"])):
             raise ConductorError("generic stage id is invalid")
         ids.append(stage["id"])
-        if stage["type"] not in AGENT_STAGE_TYPES | {"test", "commit", "human_gate"}:
+        if stage["type"] not in AGENT_STAGE_TYPES | {"workspace_seed", "test", "commit", "human_gate"}:
             raise ConductorError(f"generic stage {stage['id']} type is invalid")
         if not isinstance(stage["dependsOn"], list) or not all(isinstance(item, str) for item in stage["dependsOn"]):
             raise ConductorError(f"generic stage {stage['id']} dependencies are invalid")
@@ -98,10 +100,20 @@ def validate_manifest(value: Any) -> dict[str, Any]:
             if provider not in AGENT_BINARIES:
                 raise ConductorError(f"generic stage {stage['id']} provider is invalid")
             stage["provider"] = provider
+            if provider == "cursor" and stage["type"] in {"implementation", "repair"}:
+                raise ConductorError(f"generic stage {stage['id']}: {CURSOR_WRITE_FORBIDDEN}")
             if not isinstance(stage.get("prompt"), str) or not stage["prompt"]:
                 raise ConductorError(f"generic stage {stage['id']} prompt is required")
             if not isinstance(stage.get("maxTurns", 5), int) or not 1 <= stage.get("maxTurns", 5) <= 50:
                 raise ConductorError(f"generic stage {stage['id']} maxTurns is invalid")
+            if stage.get("emitAccumulatedDiff", False) not in {True, False}:
+                raise ConductorError(f"generic stage {stage['id']} emitAccumulatedDiff is invalid")
+            if stage.get("emitAccumulatedDiff", False) and stage["type"] not in {"implementation", "repair"}:
+                raise ConductorError(f"generic stage {stage['id']} cannot emit an accumulated diff")
+            if "finishReserveSeconds" in stage:
+                reserve = stage["finishReserveSeconds"]
+                if not isinstance(reserve, int) or not 1 <= reserve < stage["timeoutSeconds"]:
+                    raise ConductorError(f"generic stage {stage['id']} finishReserveSeconds is invalid")
             context_paths = stage.get("contextPaths", [])
             if not isinstance(context_paths, list) or not all(
                 isinstance(item, str) and item and not item.startswith("/") and ".." not in Path(item).parts
@@ -126,6 +138,10 @@ def validate_manifest(value: Any) -> dict[str, Any]:
                 attachment_names.append(name)
             if len(attachment_names) != len(set(attachment_names)):
                 raise ConductorError(f"generic stage {stage['id']} attachment names must be unique")
+            if "recoveryPolicy" in stage:
+                if stage["type"] not in {"implementation", "repair"}:
+                    raise ConductorError(f"generic stage {stage['id']} recoveryPolicy is only valid on write stages")
+                _validate_recovery_policy(stage["id"], stage["recoveryPolicy"], stage.get("allowedPaths", []))
         if stage["type"] == "review" and "repairPolicy" in stage:
             policy = stage["repairPolicy"]
             if not isinstance(policy, dict) or not isinstance(policy.get("maxRounds"), int) or not 1 <= policy["maxRounds"] <= 5:
@@ -134,6 +150,8 @@ def validate_manifest(value: Any) -> dict[str, Any]:
             if provider not in AGENT_BINARIES:
                 raise ConductorError(f"review stage {stage['id']} repair provider is invalid")
             policy["provider"] = provider
+            if provider == "cursor" and not policy.get("readOnly", False):
+                raise ConductorError(f"review stage {stage['id']}: {CURSOR_WRITE_FORBIDDEN}")
             if not isinstance(policy.get("prompt"), str) or not policy["prompt"]:
                 raise ConductorError(f"review stage {stage['id']} repair prompt is required")
             if not isinstance(policy.get("maxTurns", 5), int) or not 1 <= policy.get("maxTurns", 5) <= 50:
@@ -156,6 +174,29 @@ def validate_manifest(value: Any) -> dict[str, Any]:
                 for item in preserve_paths
             ):
                 raise ConductorError(f"test stage {stage['id']} preservePaths are invalid")
+        if stage["type"] == "workspace_seed":
+            if not re.fullmatch(r"[0-9]{8}T[0-9]{6}Z-[a-z0-9-]+-[0-9a-f]{8}", str(stage.get("sourceRunId", ""))):
+                raise ConductorError(f"workspace seed {stage['id']} sourceRunId is invalid")
+            if not re.fullmatch(r"[a-z0-9][a-z0-9-]{1,63}", str(stage.get("sourceStageId", ""))):
+                raise ConductorError(f"workspace seed {stage['id']} sourceStageId is invalid")
+            if not isinstance(stage.get("expectedPatchSha256"), str) or not re.fullmatch(r"[0-9a-f]{64}", stage["expectedPatchSha256"]):
+                raise ConductorError(f"workspace seed {stage['id']} expectedPatchSha256 is invalid")
+            if not isinstance(stage.get("allowedPaths"), list) or not stage["allowedPaths"]:
+                raise ConductorError(f"workspace seed {stage['id']} requires exact allowedPaths")
+            source_attempt = stage.get("sourceAttempt", "initial")
+            if not isinstance(source_attempt, str) or not re.fullmatch(r"(initial|attempt-[0-9]{2})", source_attempt):
+                raise ConductorError(f"workspace seed {stage['id']} sourceAttempt is invalid")
+            if "expectedDiagnosticSha256" in stage:
+                digest = stage["expectedDiagnosticSha256"]
+                if not isinstance(digest, str) or not re.fullmatch(r"[0-9a-f]{64}", digest):
+                    raise ConductorError(f"workspace seed {stage['id']} expectedDiagnosticSha256 is invalid")
+        if stage["type"] == "human_gate":
+            required = stage.get("requireAccepted")
+            if required is not None:
+                if not isinstance(required, list) or not required or not all(isinstance(item, str) for item in required):
+                    raise ConductorError(f"human_gate {stage['id']} requireAccepted is invalid")
+                if not set(required).issubset(set(stage["dependsOn"])):
+                    raise ConductorError(f"human_gate {stage['id']} requireAccepted must be subset of dependsOn")
         gate = stage.get("gate")
         if gate is not None and gate not in HIGH_RISK_PERMISSIONS | {"custom"}:
             raise ConductorError(f"generic stage {stage['id']} gate is invalid")
@@ -167,8 +208,121 @@ def validate_manifest(value: Any) -> dict[str, Any]:
     for stage in stages:
         if not set(stage["dependsOn"]).issubset(known) or stage["id"] in stage["dependsOn"]:
             raise ConductorError(f"generic stage {stage['id']} dependencies are invalid")
+        required = stage.get("requireAccepted")
+        if required is not None and not set(required).issubset(known):
+            raise ConductorError(f"generic stage {stage['id']} requireAccepted references unknown stages")
     topological_order(value)
     return value
+
+
+def _validate_recovery_policy(stage_id: str, policy: Any, parent_paths: list[str]) -> None:
+    if not isinstance(policy, dict):
+        raise ConductorError(f"write stage {stage_id} recoveryPolicy is invalid")
+    if not isinstance(policy.get("maxAttempts"), int) or not 1 <= policy["maxAttempts"] <= 3:
+        raise ConductorError(f"write stage {stage_id} recoveryPolicy.maxAttempts is invalid")
+    mode = policy.get("mode", "validate")
+    if mode not in RECOVERY_MODES:
+        raise ConductorError(f"write stage {stage_id} recoveryPolicy.mode is invalid")
+    policy["mode"] = mode
+    if not isinstance(policy.get("timeoutSeconds", 120), int) or not 1 <= policy.get("timeoutSeconds", 120) <= 1800:
+        raise ConductorError(f"write stage {stage_id} recoveryPolicy.timeoutSeconds is invalid")
+    if not isinstance(policy.get("maxTurns", 5), int) or not 1 <= policy.get("maxTurns", 5) <= 20:
+        raise ConductorError(f"write stage {stage_id} recoveryPolicy.maxTurns is invalid")
+    paths = policy.get("allowedPaths", parent_paths)
+    if not isinstance(paths, list) or not paths:
+        raise ConductorError(f"write stage {stage_id} recoveryPolicy.allowedPaths are invalid")
+    if not set(paths).issubset(set(parent_paths)):
+        raise ConductorError(f"write stage {stage_id} recoveryPolicy.allowedPaths cannot widen stage allowlist")
+    policy["allowedPaths"] = paths
+
+
+def _finish_reserve_seconds(stage: dict[str, Any]) -> int:
+    if "finishReserveSeconds" in stage:
+        return int(stage["finishReserveSeconds"])
+    return max(30, min(120, stage["timeoutSeconds"] // 10))
+
+
+def _work_budget_seconds(stage: dict[str, Any]) -> int:
+    reserve = _finish_reserve_seconds(stage)
+    budget = stage["timeoutSeconds"] - reserve
+    if budget < 1:
+        raise ConductorError(f"stage {stage['id']} finish reserve leaves no work budget")
+    return budget
+
+
+def _is_timeout_error(error: str) -> bool:
+    return "timed out after" in error
+
+
+def _is_hard_attempt_failure(error: str) -> bool:
+    markers = (
+        "outside allowedPaths",
+        "mutated its isolated workspace",
+        "wrong handoff",
+        "recoveryPolicy.allowedPaths cannot widen",
+    )
+    return any(marker in error for marker in markers)
+
+
+def _path_sha256(workspace: Path, relative: str) -> str:
+    target = workspace / relative
+    if not target.is_file() or target.is_symlink():
+        return sha256_bytes(b"")
+    return sha256_bytes(target.read_bytes())
+
+
+def _preserve_diagnostic(
+    *,
+    run_dir: Path,
+    stage_id: str,
+    attempt: int,
+    workspace: Path,
+    reason: str,
+    handoff_hash: str,
+) -> dict[str, Any]:
+    changed = _changed_paths(workspace)
+    path_hashes = {path: _path_sha256(workspace, path) for path in changed}
+    status_bytes = git(workspace, "status", "--porcelain=v1", "-z", "--untracked-files=all")
+    diff = git(workspace, "diff", "--binary", "HEAD")
+    body = {
+        "stageId": stage_id,
+        "attempt": attempt,
+        "reason": reason,
+        "accepted": False,
+        "handoffSha256": handoff_hash,
+        "workspace": str(workspace.relative_to(run_dir)),
+        "changedPaths": changed,
+        "changedPathSha256": path_hashes,
+        "workspaceStatusSha256": sha256_bytes(status_bytes),
+        "diffSha256": sha256_bytes(diff),
+    }
+    diagnostic_hash = sha256_bytes(json.dumps(body, sort_keys=True, separators=(",", ":")).encode())
+    body["diagnosticSha256"] = diagnostic_hash
+    prefix = run_dir / "stages" / stage_id / f"attempt-{attempt:02d}"
+    write_once(prefix.with_suffix(".diagnostic.json"), json.dumps(body, indent=2, sort_keys=True).encode() + b"\n")
+    write_once(prefix.with_suffix(".diagnostic.diff.patch"), diff)
+    write_once(prefix.with_suffix(".diagnostic.changed-files.json"), json.dumps(changed, indent=2).encode() + b"\n")
+    write_once(run_dir / "workspaces" / stage_id / f"attempt-{attempt:02d}.diagnostic", (diagnostic_hash + "\n").encode())
+    return body
+
+
+def _verify_diagnostic_hash(workspace: Path, diagnostic: dict[str, Any]) -> None:
+    changed = _changed_paths(workspace)
+    if changed != diagnostic["changedPaths"]:
+        raise ConductorError("diagnostic workspace changed-path set drifted before recovery")
+    for path, expected in diagnostic["changedPathSha256"].items():
+        if _path_sha256(workspace, path) != expected:
+            raise ConductorError(f"diagnostic workspace file hash drifted before recovery: {path}")
+    status_bytes = git(workspace, "status", "--porcelain=v1", "-z", "--untracked-files=all")
+    if sha256_bytes(status_bytes) != diagnostic["workspaceStatusSha256"]:
+        raise ConductorError("diagnostic workspace status hash drifted before recovery")
+    probe = {key: value for key, value in diagnostic.items() if key != "diagnosticSha256"}
+    if sha256_bytes(json.dumps(probe, sort_keys=True, separators=(",", ":")).encode()) != diagnostic["diagnosticSha256"]:
+        raise ConductorError("diagnostic artifact hash mismatch")
+
+
+def _diagnostic_allowlist_clean(diagnostic: dict[str, Any], allowed_paths: list[str]) -> bool:
+    return bool(diagnostic["changedPaths"]) and _paths_allowed(diagnostic["changedPaths"], allowed_paths)
 
 
 def topological_order(manifest: dict[str, Any]) -> list[str]:
@@ -197,6 +351,26 @@ def _changed_paths(snapshot: Path) -> list[str]:
 
 def _paths_allowed(paths: list[str], patterns: list[str]) -> bool:
     return all(any(fnmatch.fnmatchcase(path, pattern) for pattern in patterns) for path in paths)
+
+
+def _changed_state(workspace: Path, paths: list[str]) -> str:
+    records: list[dict[str, Any]] = []
+    for relative in paths:
+        path = workspace / relative
+        if path.is_symlink():
+            records.append({"path": relative, "type": "symlink", "target": os.readlink(path)})
+        elif path.is_file():
+            records.append({"path": relative, "type": "file", "sha256": sha256_bytes(path.read_bytes()), "mode": path.stat().st_mode & 0o777})
+        else:
+            records.append({"path": relative, "type": "missing"})
+    return sha256_bytes(json.dumps(records, sort_keys=True, separators=(",", ":")).encode())
+
+
+def _workspace_patch(workspace: Path, *, accumulated: bool = False) -> tuple[list[str], bytes]:
+    git(workspace, "add", "-A")
+    base = "HEAD^" if accumulated else "HEAD"
+    changed = [item.decode() for item in git(workspace, "diff", "--cached", "--name-only", "-z", base).split(b"\0") if item]
+    return sorted(changed), git(workspace, "diff", "--cached", "--binary", base)
 
 
 def _input_manifest(stage: dict[str, Any], accepted: dict[str, dict[str, Any]]) -> tuple[dict[str, str], str]:
@@ -281,6 +455,24 @@ def _checkpoint_dependencies(workspace: Path) -> None:
         ["git", "-c", "user.name=Foundry Conductor", "-c", "user.email=conductor@localhost", "commit", "-qm", "conductor dependency checkpoint"],
         cwd=workspace,
     )
+
+
+def _materialize_workspace_seed(base_snapshot: Path, source_workspace: Path, destination: Path) -> tuple[list[str], bytes]:
+    _create_workspace(base_snapshot, destination)
+    changed = _changed_paths(source_workspace)
+    for relative in changed:
+        source = source_workspace / relative
+        target = destination / relative
+        if source.is_symlink():
+            target.parent.mkdir(parents=True, exist_ok=True)
+            target.symlink_to(os.readlink(source))
+        elif source.is_file():
+            target.parent.mkdir(parents=True, exist_ok=True)
+            shutil.copy2(source, target)
+        elif not source.exists() and target.exists():
+            target.unlink()
+    git(destination, "add", "-A")
+    return changed, git(destination, "diff", "--cached", "--binary", "HEAD")
 
 
 def _stage_prompt(stage: dict[str, Any], handoff_hash: str, handoff_path: Path, write_allowed: bool, feedback: list[dict[str, Any]] | None = None) -> str:
@@ -410,8 +602,9 @@ def run_dag(*, root: Path, manifest_path: Path, live: bool, live_confirmed: bool
                     def invoke_agent(
                         active_stage: dict[str, Any], workspace: Path, handoff_path: Path,
                         handoff_hash: str, prefix: Path, feedback: list[dict[str, Any]] | None = None,
+                        baseline_paths_override: list[str] | None = None,
                     ) -> dict[str, Any]:
-                        baseline_paths = _changed_paths(workspace)
+                        baseline_paths = baseline_paths_override if baseline_paths_override is not None else _changed_paths(workspace)
                         prompt = _stage_prompt(
                             active_stage, handoff_hash, workspace / ".conductor" / "handoff",
                             active_stage["type"] in {"implementation", "repair"}, feedback,
@@ -451,6 +644,7 @@ def run_dag(*, root: Path, manifest_path: Path, live: bool, live_confirmed: bool
                         instructions=stage["prompt"],
                     )
                     _checkpoint_dependencies(workspace)
+                    workspace_baseline_paths = _changed_paths(workspace)
                     accepted_result = None
                     result = None
                     last_attempt_error = None
@@ -458,7 +652,7 @@ def run_dag(*, root: Path, manifest_path: Path, live: bool, live_confirmed: bool
                         prefix = run_dir / "stages" / stage_id / f"attempt-{attempt:02d}"
                         log.append("stage_attempt_started", stageId=stage_id, attempt=attempt, provider=stage["provider"], handoffSha256=handoff_hash)
                         try:
-                            result = invoke_agent(stage, workspace, handoff_path, handoff_hash, prefix)
+                            result = invoke_agent(stage, workspace, handoff_path, handoff_hash, prefix, baseline_paths_override=workspace_baseline_paths)
                             accepted_result = result
                             break
                         except ConductorError as exc:
@@ -500,8 +694,7 @@ def run_dag(*, root: Path, manifest_path: Path, live: bool, live_confirmed: bool
                         repair_result = invoke_agent(repair_stage, repair_workspace, repair_handoff, repair_hash, repair_prefix, findings)
                         if repair_result["status"] != "pass":
                             raise ConductorError(f"repair for {stage_id} round {round_number} did not pass")
-                        repair_changed = _changed_paths(repair_workspace)
-                        repair_diff = git(repair_workspace, "diff", "--binary", "HEAD")
+                        repair_changed, repair_diff = _workspace_patch(repair_workspace)
                         repair_diff_path = run_dir / "stages" / stage_id / f"repair-{round_number:02d}.diff.patch"
                         repair_manifest_path = run_dir / "stages" / stage_id / f"repair-{round_number:02d}.changed-files.json"
                         write_once(repair_diff_path, repair_diff)
@@ -526,8 +719,7 @@ def run_dag(*, root: Path, manifest_path: Path, live: bool, live_confirmed: bool
                     if accepted_result["status"] != "pass":
                         raise ConductorError(f"generic stage {stage_id} did not reach pass")
                     active_workspace = workspace
-                    changed = _changed_paths(active_workspace)
-                    diff = git(active_workspace, "diff", "--binary", "HEAD")
+                    changed, diff = _workspace_patch(active_workspace, accumulated=stage.get("emitAccumulatedDiff", False))
                     changed_path = run_dir / "stages" / stage_id / "changed-files.json"
                     diff_path = run_dir / "stages" / stage_id / "diff.patch"
                     write_once(changed_path, json.dumps(changed, indent=2).encode() + b"\n")
@@ -535,6 +727,30 @@ def run_dag(*, root: Path, manifest_path: Path, live: bool, live_confirmed: bool
                     artifact_files.extend([str(changed_path.relative_to(run_dir)), str(diff_path.relative_to(run_dir))])
                     payload = json.dumps(accepted_result, sort_keys=True).encode()
                     payload += b"".join((run_dir / relative).read_bytes() for relative in artifact_files)
+                elif stage["type"] == "workspace_seed":
+                    source_run = (root / "runs" / stage["sourceRunId"]).resolve()
+                    if source_run.parent != (root / "runs").resolve() or not source_run.is_dir():
+                        raise ConductorError(f"workspace seed source run does not exist: {stage_id}")
+                    source_summary = load_json(source_run / "summary.json")
+                    if source_summary.get("status") != "failed" or source_summary.get("sourceUnchanged") is not True:
+                        raise ConductorError(f"workspace seed source run is not a safe failed run: {stage_id}")
+                    source_workspace = source_run / "workspaces" / stage["sourceStageId"] / "initial"
+                    if not source_workspace.is_dir():
+                        raise ConductorError(f"workspace seed source workspace is missing: {stage_id}")
+                    seed_workspace = run_dir / "workspaces" / stage_id / "seed"
+                    changed, seed_patch = _materialize_workspace_seed(snapshot, source_workspace, seed_workspace)
+                    if not _paths_allowed(changed, stage["allowedPaths"]):
+                        raise ConductorError(f"workspace seed {stage_id} includes a path outside allowedPaths")
+                    if sha256_bytes(seed_patch) != stage["expectedPatchSha256"]:
+                        raise ConductorError(f"workspace seed {stage_id} patch hash mismatch")
+                    stage_dir = run_dir / "stages" / stage_id
+                    diff_path = stage_dir / "diff.patch"
+                    changed_path = stage_dir / "changed-files.json"
+                    write_once(diff_path, seed_patch)
+                    write_once(changed_path, json.dumps(changed, indent=2).encode() + b"\n")
+                    artifact_files.extend([str(changed_path.relative_to(run_dir)), str(diff_path.relative_to(run_dir))])
+                    payload = seed_patch
+                    log.append("workspace_seed_imported", stageId=stage_id, sourceRunId=stage["sourceRunId"], sourceStageId=stage["sourceStageId"], patchSha256=stage["expectedPatchSha256"], changedPaths=changed)
                 elif stage["type"] == "test":
                     test_workspace = run_dir / "workspaces" / stage_id / "test"
                     _create_workspace(snapshot, test_workspace)
@@ -543,7 +759,8 @@ def run_dag(*, root: Path, manifest_path: Path, live: bool, live_confirmed: bool
                         instructions="Execute exactly this gate command: " + json.dumps(stage["command"]),
                     )
                     pre_status = git(test_workspace, "status", "--porcelain=v1")
-                    pre_diff = git(test_workspace, "diff", "--binary", "HEAD")
+                    pre_paths = _changed_paths(test_workspace)
+                    pre_state = _changed_state(test_workspace, pre_paths)
                     preserved_before: dict[str, bytes] = {}
                     for relative in stage.get("preservePaths", []):
                         preserved = test_workspace / relative
@@ -552,12 +769,13 @@ def run_dag(*, root: Path, manifest_path: Path, live: bool, live_confirmed: bool
                         preserved_before[relative] = preserved.read_bytes()
                     completed = run_command(stage["command"], cwd=test_workspace, timeout_seconds=stage["timeoutSeconds"], check=False)
                     post_status = git(test_workspace, "status", "--porcelain=v1")
-                    post_diff = git(test_workspace, "diff", "--binary", "HEAD")
+                    post_paths = _changed_paths(test_workspace)
+                    post_state = _changed_state(test_workspace, post_paths)
                     for relative, original in preserved_before.items():
                         preserved = test_workspace / relative
                         if not preserved.is_file() or preserved.read_bytes() != original:
                             raise ConductorError(f"test stage {stage_id} changed preserved path: {relative}")
-                    if post_status != pre_status or post_diff != pre_diff:
+                    if post_status != pre_status or post_paths != pre_paths or post_state != pre_state:
                         raise ConductorError(f"test stage {stage_id} changed tracked source or expanded the diff")
                     stage_dir = run_dir / "stages" / stage_id
                     outputs = {

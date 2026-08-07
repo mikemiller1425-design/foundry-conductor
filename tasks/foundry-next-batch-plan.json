@@ -8,12 +8,36 @@
   "permissions": {"push": false, "nasAccess": false, "externalActions": false, "spending": false, "destructive": false, "productionExecution": false},
   "stages": [
     {
-      "id": "claude-package-2a-backend", "type": "implementation", "role": "backend", "dependsOn": [],
-      "attachments": [{"path": "runs/20260807T003951Z-package-2a-final-revision-9f5b1187/revised-draft.md", "sha256": "28f1bd23ab3232d67e0df10f7518e8d9a6a986da0251dac300ac711bb2b2873d", "name": "frozen-package-2a-comprehensive-brief.md"}],
-      "contextPaths": ["apps/api/src/nas/*.ts", "packages/contracts/src/nasCatalog.ts", "packages/contracts/src/index.ts", "packages/contracts/src/commandCenter/coverage.ts", "docs/01-mission/foundry-package-2-decision-record-2026-08-06.md", "docs/01-mission/foundry-package-1b-decision-record-2026-08-05.md", "docs/03-architecture/nas-readonly-boundary-threat-model.md", "docs/03-architecture/foundry-construction-map.md", "CHANGELOG.md", "package.json", "pnpm-lock.yaml"],
+      "id": "provisional-backend-seed", "type": "workspace_seed", "dependsOn": [],
+      "sourceRunId": "20260807T031051Z-foundry-package-2a-2c-isolated-batch-f1b61b67", "sourceStageId": "claude-package-2a-backend",
+      "expectedPatchSha256": "7ef41f18559ab6090a89a12d5285ac39c6c3b4896d892c29beb98c6879cc15c2",
       "allowedPaths": ["packages/contracts/src/nasCatalog.ts", "packages/contracts/src/nasCatalog.test.ts", "packages/contracts/src/index.ts", "apps/api/src/nas/nasCatalogAdapter.ts", "apps/api/src/nas/nasCatalogAdapter.test.ts", "apps/api/src/nas/nasCatalogFixtureEntry.ts", "apps/api/src/nas/nasRoots.ts", "apps/api/src/nas/__fixtures__/*.ts", "apps/api/src/nas/*.ts", "docs/evidence/package-2a/**", "docs/03-architecture/nas-readonly-boundary-threat-model.md", "CHANGELOG.md"],
-      "prompt": "The attached draft is not certified or accepted evidence. The operator's present batch authorization designates its exact bytes as the frozen comprehensive Package 2a implementation brief, together with the attached authoritative Foundry decision documents. Read every handoff file and implement only Package 2a contract/scanner truth in this disposable workspace. Preserve every exclusion: no persistence, transport, API route, agent-city/frontend, construction-map or decision-record edit, NAS, /Volumes, production, Package 2b/2c/2d, or acceptance claim. CONFIGURED_NAS_ROOTS remains Object.freeze([]). Begin by recording the clean disposable baseline as required. Produce the complete confined code, proofs, completion report, threat-model append, and changelog entry. Run useful scoped checks while working, but the conductor owns the formal gates. Return pass only with inspectable tracked changes confined to allowedPaths.",
-      "timeoutSeconds": 1800, "maxAttempts": 2, "maxTurns": 50
+      "timeoutSeconds": 120, "maxAttempts": 1
+    },
+    {
+      "id": "claude-package-2a-contracts", "type": "implementation", "role": "backend", "dependsOn": ["provisional-backend-seed"],
+      "attachments": [{"path": "runs/20260807T003951Z-package-2a-final-revision-9f5b1187/revised-draft.md", "sha256": "28f1bd23ab3232d67e0df10f7518e8d9a6a986da0251dac300ac711bb2b2873d", "name": "frozen-package-2a-comprehensive-brief.md"}],
+      "contextPaths": ["packages/contracts/src/nasCatalog.ts", "packages/contracts/src/nasCatalog.test.ts", "packages/contracts/src/index.ts", "packages/contracts/src/commandCenter/coverage.ts"],
+      "allowedPaths": ["packages/contracts/src/nasCatalog.ts", "packages/contracts/src/nasCatalog.test.ts", "packages/contracts/src/index.ts"],
+      "prompt": "Continue the preserved provisional model work. Read the frozen comprehensive brief and finish only the Package 2a shared contracts, refinements, exports, contract fixtures, and every named executable contract proof. Do not touch scanner, governance, frontend, persistence, NAS, /Volumes, or downstream work. Return pass only with a complete confined incremental contract diff.",
+      "timeoutSeconds": 1200, "maxAttempts": 2, "maxTurns": 35
+    },
+    {
+      "id": "claude-package-2a-scanner", "type": "implementation", "role": "backend", "dependsOn": ["provisional-backend-seed", "claude-package-2a-contracts"],
+      "attachments": [{"path": "runs/20260807T003951Z-package-2a-final-revision-9f5b1187/revised-draft.md", "sha256": "28f1bd23ab3232d67e0df10f7518e8d9a6a986da0251dac300ac711bb2b2873d", "name": "frozen-package-2a-comprehensive-brief.md"}],
+      "contextPaths": ["apps/api/src/nas/*.ts", "apps/api/src/nas/__fixtures__/*.ts", "packages/contracts/src/nasCatalog.ts"],
+      "allowedPaths": ["apps/api/src/nas/nasCatalogAdapter.ts", "apps/api/src/nas/nasCatalogAdapter.test.ts", "apps/api/src/nas/nasCatalogFixtureEntry.ts", "apps/api/src/nas/nasRoots.ts", "apps/api/src/nas/__fixtures__/*.ts", "apps/api/src/nas/*.ts"],
+      "prompt": "Continue the accumulated provisional and completed contract work. Finish only the Package 2a scanner, root refusal typing, fixture entry, controlled fixtures, and every named scanner/security executable proof from the frozen brief. CONFIGURED_NAS_ROOTS remains Object.freeze([]). No NAS, /Volumes, frontend, persistence, transport, production, or downstream work. Return pass only with a complete confined incremental scanner/proof diff.",
+      "timeoutSeconds": 1500, "maxAttempts": 2, "maxTurns": 40
+    },
+    {
+      "id": "claude-package-2a-backend", "type": "implementation", "role": "backend", "dependsOn": ["provisional-backend-seed", "claude-package-2a-contracts", "claude-package-2a-scanner"],
+      "attachments": [{"path": "runs/20260807T003951Z-package-2a-final-revision-9f5b1187/revised-draft.md", "sha256": "28f1bd23ab3232d67e0df10f7518e8d9a6a986da0251dac300ac711bb2b2873d", "name": "frozen-package-2a-comprehensive-brief.md"}],
+      "contextPaths": ["docs/evidence/package-2a/**", "docs/03-architecture/nas-readonly-boundary-threat-model.md", "CHANGELOG.md", "apps/api/src/nas/*.ts", "packages/contracts/src/nasCatalog.ts"],
+      "allowedPaths": ["docs/evidence/package-2a/**", "docs/03-architecture/nas-readonly-boundary-threat-model.md", "CHANGELOG.md"],
+      "emitAccumulatedDiff": true,
+      "prompt": "Complete only the Package 2a governance deliverables over the accumulated implementation: completion-report structure and baseline evidence, append-only threat-model section 9, and one changelog entry. Preserve every frozen-brief exclusion and make no acceptance claim. The conductor will later supply formal gate outputs for final report completion. Return pass with the confined governance changes; emit the complete accumulated backend diff for downstream review.",
+      "timeoutSeconds": 900, "maxAttempts": 2, "maxTurns": 25
     },
     {
       "id": "cursor-package-2c-preparation", "type": "reconnaissance", "role": "frontend", "dependsOn": ["claude-package-2a-backend"],

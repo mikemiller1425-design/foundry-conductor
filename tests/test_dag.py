@@ -10,7 +10,7 @@ from pathlib import Path
 from unittest.mock import patch
 
 from foundry_conductor.core import AgentCommand, ConductorError, fingerprint_repo, run_command as real_run_command
-from foundry_conductor.dag import _build_handoff, interact, run_dag, topological_order, validate_manifest, validate_stage_result
+from foundry_conductor.dag import _build_handoff, _materialize_workspace_seed, _workspace_patch, interact, run_dag, topological_order, validate_manifest, validate_stage_result
 
 
 def command(repo: Path, *argv: str) -> None:
@@ -245,6 +245,44 @@ class DagTests(unittest.TestCase):
                 expanded = run_dag(root=root, manifest_path=path, live=True, live_confirmed=True)
             self.assertEqual("failed", expanded["status"])
             self.assertIn("expanded the diff", expanded["error"])
+
+    def test_failed_workspace_seed_is_hash_bound_and_allowlisted(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary); repo = self.repo(root)
+            source_run_id = "20260807T000000Z-failed-seed-deadbeef"
+            source_run = root / "runs" / source_run_id
+            workspace = source_run / "workspaces" / "author-stage" / "initial"
+            workspace.parent.mkdir(parents=True)
+            real_run_command(["git", "clone", "-q", str(repo), str(workspace)], cwd=root)
+            (workspace / "README.md").write_text("provisional model work\n")
+            (source_run / "summary.json").write_text(json.dumps({"status": "failed", "sourceUnchanged": True}))
+            preview = root / "preview"
+            changed, patch_bytes = _materialize_workspace_seed(repo, workspace, preview)
+            self.assertEqual(["README.md"], changed)
+            manifest = self.manifest(repo)
+            manifest["stages"] = [{
+                "id": "seed", "type": "workspace_seed", "dependsOn": [], "timeoutSeconds": 30, "maxAttempts": 1,
+                "sourceRunId": source_run_id, "sourceStageId": "author-stage",
+                "expectedPatchSha256": hashlib.sha256(patch_bytes).hexdigest(), "allowedPaths": ["README.md"],
+            }]
+            path = root / "manifest.json"; path.write_text(json.dumps(manifest))
+            result = run_dag(root=root, manifest_path=path, live=True, live_confirmed=True)
+            self.assertEqual("complete", result["status"])
+            seed_patch = Path(result["runDirectory"]) / "stages" / "seed" / "diff.patch"
+            self.assertEqual(patch_bytes, seed_patch.read_bytes())
+            manifest["stages"][0]["expectedPatchSha256"] = "0" * 64
+            path.write_text(json.dumps(manifest))
+            mismatch = run_dag(root=root, manifest_path=path, live=True, live_confirmed=True)
+            self.assertEqual("failed", mismatch["status"])
+            self.assertIn("patch hash mismatch", mismatch["error"])
+
+    def test_workspace_patch_includes_new_files(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary); repo = self.repo(root)
+            (repo / "new.txt").write_text("new model artifact\n")
+            changed, patch_bytes = _workspace_patch(repo)
+            self.assertIn("new.txt", changed)
+            self.assertIn(b"new model artifact", patch_bytes)
 
     def test_controlled_write_cannot_pass_without_artifact(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:
