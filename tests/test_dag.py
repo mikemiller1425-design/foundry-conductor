@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import hashlib
 import re
 import subprocess
 import tempfile
@@ -201,6 +202,49 @@ class DagTests(unittest.TestCase):
             self.assertIn("readable", (handoff / "dependencies" / "producer" / "artifacts" / artifact.name).read_text())
             self.assertEqual(digest, json.loads((handoff / "manifest.json").read_text())["handoffSha256"])
             self.assertTrue(any(item["path"] == "context/README.md" for item in manifest["files"]))
+
+    def test_static_attachments_reject_traversal_and_hash_mismatch(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            conductor = Path(temporary) / "conductor"; run_dir = conductor / "runs" / "run"; run_dir.mkdir(parents=True)
+            repo = self.repo(Path(temporary)); workspace = Path(temporary) / "workspace"
+            real_run_command(["git", "clone", "-q", str(repo), str(workspace)], cwd=Path(temporary))
+            manifest = self.manifest(repo)
+            manifest["stages"][0]["attachments"] = [{"path": "../secret", "sha256": "a" * 64, "name": "brief.md"}]
+            with self.assertRaisesRegex(ConductorError, "attachment path is invalid"):
+                validate_manifest(manifest)
+            evidence = conductor / "runs" / "evidence.md"; evidence.write_text("brief\n")
+            stage = {"id": "consumer", "dependsOn": [], "attachments": [{"path": "runs/evidence.md", "sha256": "0" * 64, "name": "brief.md"}]}
+            with self.assertRaisesRegex(ConductorError, "attachment hash mismatch"):
+                _build_handoff(run_dir=run_dir, workspace=workspace, stage=stage, accepted={}, instructions="inspect")
+            good_run = conductor / "runs" / "good"; good_run.mkdir()
+            stage["attachments"][0]["sha256"] = hashlib.sha256(evidence.read_bytes()).hexdigest()
+            handoff, digest, manifest_value = _build_handoff(run_dir=good_run, workspace=workspace, stage=stage, accepted={}, instructions="inspect")
+            self.assertEqual("brief\n", (handoff / "attachments" / "brief.md").read_text())
+            self.assertEqual(digest, json.loads((handoff / "manifest.json").read_text())["handoffSha256"])
+            self.assertTrue(any(item["path"] == "attachments/brief.md" for item in manifest_value["files"]))
+
+    def test_gate_ignores_ignored_artifacts_but_rejects_tracked_diff_expansion(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary); repo = self.repo(root)
+            (repo / ".gitignore").write_text(".gate-cache/\n"); (repo / "pnpm-lock.yaml").write_text("lock\n")
+            command(repo, "git", "add", ".gitignore", "pnpm-lock.yaml")
+            command(repo, "git", "-c", "user.name=Test", "-c", "user.email=test@localhost", "commit", "-qm", "gate fixture")
+            manifest = self.manifest(repo)
+            manifest["stages"] = [{"id": "gate", "type": "test", "dependsOn": [], "command": ["fake-gate"], "allowedCommands": [["fake-gate"]], "preservePaths": ["pnpm-lock.yaml"], "timeoutSeconds": 30, "maxAttempts": 1}]
+            path = root / "manifest.json"; path.write_text(json.dumps(manifest))
+            mutate_tracked = False
+            def execute(argv, cwd, **kwargs):
+                if argv[0] == "git": return real_run_command(argv, cwd=cwd, **kwargs)
+                (cwd / ".gate-cache").mkdir(); (cwd / ".gate-cache" / "result").write_text("ignored")
+                if mutate_tracked: (cwd / "README.md").write_text("expanded\n")
+                return subprocess.CompletedProcess(argv, 0, b"1 passed, 0 failed, 0 skipped\n", b"")
+            with patch("foundry_conductor.dag.run_command", side_effect=execute):
+                clean = run_dag(root=root, manifest_path=path, live=True, live_confirmed=True)
+                self.assertEqual("complete", clean["status"])
+                mutate_tracked = True
+                expanded = run_dag(root=root, manifest_path=path, live=True, live_confirmed=True)
+            self.assertEqual("failed", expanded["status"])
+            self.assertIn("expanded the diff", expanded["error"])
 
     def test_controlled_write_cannot_pass_without_artifact(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:

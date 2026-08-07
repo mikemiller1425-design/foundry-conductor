@@ -108,6 +108,24 @@ def validate_manifest(value: Any) -> dict[str, Any]:
                 for item in context_paths
             ):
                 raise ConductorError(f"generic stage {stage['id']} contextPaths are invalid")
+            attachments = stage.get("attachments", [])
+            attachment_names: list[str] = []
+            if not isinstance(attachments, list):
+                raise ConductorError(f"generic stage {stage['id']} attachments are invalid")
+            for attachment in attachments:
+                if not isinstance(attachment, dict) or set(attachment) != {"path", "sha256", "name"}:
+                    raise ConductorError(f"generic stage {stage['id']} attachment fields are invalid")
+                relative = Path(attachment["path"]) if isinstance(attachment["path"], str) else Path("..")
+                name = attachment["name"]
+                if relative.is_absolute() or ".." in relative.parts or not relative.parts:
+                    raise ConductorError(f"generic stage {stage['id']} attachment path is invalid")
+                if not isinstance(name, str) or Path(name).name != name or name in {"", ".", ".."}:
+                    raise ConductorError(f"generic stage {stage['id']} attachment name is invalid")
+                if not isinstance(attachment["sha256"], str) or not re.fullmatch(r"[0-9a-f]{64}", attachment["sha256"]):
+                    raise ConductorError(f"generic stage {stage['id']} attachment sha256 is invalid")
+                attachment_names.append(name)
+            if len(attachment_names) != len(set(attachment_names)):
+                raise ConductorError(f"generic stage {stage['id']} attachment names must be unique")
         if stage["type"] == "review" and "repairPolicy" in stage:
             policy = stage["repairPolicy"]
             if not isinstance(policy, dict) or not isinstance(policy.get("maxRounds"), int) or not 1 <= policy["maxRounds"] <= 5:
@@ -132,6 +150,12 @@ def validate_manifest(value: Any) -> dict[str, Any]:
             allowed = stage.get("allowedCommands", [])
             if command not in allowed:
                 raise ConductorError(f"test stage {stage['id']} command is not explicitly allowed")
+            preserve_paths = stage.get("preservePaths", [])
+            if not isinstance(preserve_paths, list) or not all(
+                isinstance(item, str) and item and not Path(item).is_absolute() and ".." not in Path(item).parts
+                for item in preserve_paths
+            ):
+                raise ConductorError(f"test stage {stage['id']} preservePaths are invalid")
         gate = stage.get("gate")
         if gate is not None and gate not in HIGH_RISK_PERMISSIONS | {"custom"}:
             raise ConductorError(f"generic stage {stage['id']} gate is invalid")
@@ -196,19 +220,6 @@ def _build_handoff(
     handoff = run_dir / "handoffs" / name
     write_once(handoff / "instructions.md", instructions.encode() + b"\n")
     files: list[dict[str, str]] = [{"path": "instructions.md", "sha256": sha256_bytes((instructions + "\n").encode())}]
-    tracked = [item.decode() for item in git(workspace, "ls-files", "-z").split(b"\0") if item]
-    for pattern in stage.get("contextPaths", []):
-        matches = sorted(path for path in tracked if fnmatch.fnmatchcase(path, pattern))
-        if not matches:
-            raise ConductorError(f"handoff contextPath matched no tracked file: {pattern}")
-        for relative in matches:
-            source = workspace / relative
-            if not source.is_file() or source.is_symlink():
-                raise ConductorError(f"handoff context file is unsafe: {relative}")
-            target = handoff / "context" / relative
-            data = source.read_bytes()
-            write_once(target, data)
-            files.append({"path": str(target.relative_to(handoff)), "sha256": sha256_bytes(data)})
     for dependency in stage["dependsOn"]:
         record = accepted[dependency]
         dependency_dir = handoff / "dependencies" / dependency
@@ -227,6 +238,31 @@ def _build_handoff(
                 completed = run_command(["git", "apply", "--check", str(target)], cwd=workspace, check=False)
                 if completed.returncode == 0:
                     run_command(["git", "apply", str(target)], cwd=workspace)
+    conductor_root = run_dir.parent.parent.resolve()
+    for attachment in stage.get("attachments", []):
+        candidate = conductor_root / attachment["path"]
+        source = candidate.resolve()
+        if candidate.is_symlink() or conductor_root not in source.parents or not source.is_file():
+            raise ConductorError(f"static attachment is outside conductor evidence or unsafe: {attachment['path']}")
+        data = source.read_bytes()
+        if sha256_bytes(data) != attachment["sha256"]:
+            raise ConductorError(f"static attachment hash mismatch: {attachment['path']}")
+        target = handoff / "attachments" / attachment["name"]
+        write_once(target, data)
+        files.append({"path": str(target.relative_to(handoff)), "sha256": attachment["sha256"]})
+    tracked = [item.decode() for item in git(workspace, "ls-files", "--cached", "--others", "--exclude-standard", "-z").split(b"\0") if item]
+    for pattern in stage.get("contextPaths", []):
+        matches = sorted(path for path in tracked if fnmatch.fnmatchcase(path, pattern))
+        if not matches:
+            raise ConductorError(f"handoff contextPath matched no tracked file: {pattern}")
+        for relative in matches:
+            source = workspace / relative
+            if not source.is_file() or source.is_symlink():
+                raise ConductorError(f"handoff context file is unsafe: {relative}")
+            target = handoff / "context" / relative
+            data = source.read_bytes()
+            write_once(target, data)
+            files.append({"path": str(target.relative_to(handoff)), "sha256": sha256_bytes(data)})
     manifest = {"stageId": stage["id"], "dependencies": stage["dependsOn"], "files": sorted(files, key=lambda item: item["path"])}
     digest = sha256_bytes(json.dumps(manifest, sort_keys=True, separators=(",", ":")).encode())
     manifest["handoffSha256"] = digest
@@ -235,6 +271,16 @@ def _build_handoff(
     visible.parent.mkdir(parents=True, exist_ok=True)
     shutil.copytree(handoff, visible)
     return handoff, digest, manifest
+
+
+def _checkpoint_dependencies(workspace: Path) -> None:
+    if not _changed_paths(workspace):
+        return
+    git(workspace, "add", "-A")
+    run_command(
+        ["git", "-c", "user.name=Foundry Conductor", "-c", "user.email=conductor@localhost", "commit", "-qm", "conductor dependency checkpoint"],
+        cwd=workspace,
+    )
 
 
 def _stage_prompt(stage: dict[str, Any], handoff_hash: str, handoff_path: Path, write_allowed: bool, feedback: list[dict[str, Any]] | None = None) -> str:
@@ -358,6 +404,8 @@ def run_dag(*, root: Path, manifest_path: Path, live: bool, live_confirmed: bool
                         status = "waiting_for_approval"
                         log.append("human_gate_waiting", stageId=stage_id, gate=stage.get("gate", "custom"), inputArtifactSha256=input_hash)
                         break
+                artifact_files: list[str] = []
+                test_result: dict[str, Any] | None = None
                 if stage["type"] in AGENT_STAGE_TYPES:
                     def invoke_agent(
                         active_stage: dict[str, Any], workspace: Path, handoff_path: Path,
@@ -402,6 +450,7 @@ def run_dag(*, root: Path, manifest_path: Path, live: bool, live_confirmed: bool
                         run_dir=run_dir, workspace=workspace, stage=stage, accepted=accepted,
                         instructions=stage["prompt"],
                     )
+                    _checkpoint_dependencies(workspace)
                     accepted_result = None
                     result = None
                     last_attempt_error = None
@@ -420,7 +469,6 @@ def run_dag(*, root: Path, manifest_path: Path, live: bool, live_confirmed: bool
                     if accepted_result is None:
                         raise ConductorError(f"generic stage {stage_id} exhausted its bounded attempts: {last_attempt_error}")
 
-                    artifact_files: list[str] = []
                     normalized_path = run_dir / "stages" / stage_id / f"attempt-{attempt:02d}.normalized.json"
                     artifact_files.append(str(normalized_path.relative_to(run_dir)))
                     repair_policy = stage.get("repairPolicy")
@@ -435,6 +483,7 @@ def run_dag(*, root: Path, manifest_path: Path, live: bool, live_confirmed: bool
                             "id": stage_id + "-repair", "type": "reconnaissance" if repair_policy.get("readOnly", False) else "repair",
                             "provider": repair_policy["provider"], "dependsOn": stage["dependsOn"],
                             "prompt": repair_policy["prompt"], "allowedPaths": repair_policy.get("allowedPaths", []),
+                            "attachments": stage.get("attachments", []), "contextPaths": stage.get("contextPaths", []),
                             "allowedCommands": repair_policy.get("allowedCommands", []),
                             "timeoutSeconds": repair_policy.get("timeoutSeconds", stage["timeoutSeconds"]), "maxAttempts": 1,
                             "maxTurns": repair_policy.get("maxTurns", 5),
@@ -446,6 +495,7 @@ def run_dag(*, root: Path, manifest_path: Path, live: bool, live_confirmed: bool
                             run_dir=run_dir, workspace=repair_workspace, stage=repair_stage,
                             accepted=accepted, instructions=repair_instructions, suffix=f"-repair-{round_number:02d}",
                         )
+                        _checkpoint_dependencies(repair_workspace)
                         repair_prefix = run_dir / "stages" / stage_id / f"repair-{round_number:02d}"
                         repair_result = invoke_agent(repair_stage, repair_workspace, repair_handoff, repair_hash, repair_prefix, findings)
                         if repair_result["status"] != "pass":
@@ -469,6 +519,7 @@ def run_dag(*, root: Path, manifest_path: Path, live: bool, live_confirmed: bool
                             run_dir=run_dir, workspace=review_workspace, stage=rereview_stage,
                             accepted=rereview_accepted, instructions=stage["prompt"], suffix=f"-review-{round_number + 1:02d}",
                         )
+                        _checkpoint_dependencies(review_workspace)
                         review_prefix = run_dir / "stages" / stage_id / f"review-{round_number + 1:02d}"
                         accepted_result = invoke_agent(stage, review_workspace, review_handoff, review_hash, review_prefix)
                         artifact_files.append(str(review_prefix.with_suffix(".normalized.json").relative_to(run_dir)))
@@ -485,12 +536,48 @@ def run_dag(*, root: Path, manifest_path: Path, live: bool, live_confirmed: bool
                     payload = json.dumps(accepted_result, sort_keys=True).encode()
                     payload += b"".join((run_dir / relative).read_bytes() for relative in artifact_files)
                 elif stage["type"] == "test":
-                    completed = run_command(stage["command"], cwd=snapshot, timeout_seconds=stage["timeoutSeconds"], check=False)
-                    write_once(run_dir / "stages" / stage_id / "stdout", completed.stdout)
-                    write_once(run_dir / "stages" / stage_id / "stderr", completed.stderr)
+                    test_workspace = run_dir / "workspaces" / stage_id / "test"
+                    _create_workspace(snapshot, test_workspace)
+                    _build_handoff(
+                        run_dir=run_dir, workspace=test_workspace, stage=stage, accepted=accepted,
+                        instructions="Execute exactly this gate command: " + json.dumps(stage["command"]),
+                    )
+                    pre_status = git(test_workspace, "status", "--porcelain=v1")
+                    pre_diff = git(test_workspace, "diff", "--binary", "HEAD")
+                    preserved_before: dict[str, bytes] = {}
+                    for relative in stage.get("preservePaths", []):
+                        preserved = test_workspace / relative
+                        if not preserved.is_file() or preserved.is_symlink():
+                            raise ConductorError(f"test stage {stage_id} preservePath is missing or unsafe: {relative}")
+                        preserved_before[relative] = preserved.read_bytes()
+                    completed = run_command(stage["command"], cwd=test_workspace, timeout_seconds=stage["timeoutSeconds"], check=False)
+                    post_status = git(test_workspace, "status", "--porcelain=v1")
+                    post_diff = git(test_workspace, "diff", "--binary", "HEAD")
+                    for relative, original in preserved_before.items():
+                        preserved = test_workspace / relative
+                        if not preserved.is_file() or preserved.read_bytes() != original:
+                            raise ConductorError(f"test stage {stage_id} changed preserved path: {relative}")
+                    if post_status != pre_status or post_diff != pre_diff:
+                        raise ConductorError(f"test stage {stage_id} changed tracked source or expanded the diff")
+                    stage_dir = run_dir / "stages" / stage_id
+                    outputs = {
+                        "stdout": completed.stdout, "stderr": completed.stderr,
+                        "pre-gate-status.txt": pre_status, "post-gate-status.txt": post_status,
+                    }
+                    for filename, data in outputs.items():
+                        target = stage_dir / filename
+                        write_once(target, data)
+                        artifact_files.append(str(target.relative_to(run_dir)))
                     if completed.returncode != 0:
                         raise ConductorError(f"test stage {stage_id} failed")
-                    payload = completed.stdout + completed.stderr
+                    payload = b"".join(outputs.values())
+                    test_result = {
+                        "command": stage["command"], "returnCode": completed.returncode,
+                        "stdoutFile": str((stage_dir / "stdout").relative_to(run_dir)),
+                        "stdoutSha256": sha256_bytes(completed.stdout),
+                        "stderrFile": str((stage_dir / "stderr").relative_to(run_dir)),
+                        "stderrSha256": sha256_bytes(completed.stderr),
+                    }
                 elif stage["type"] == "commit":
                     changed = _changed_paths(snapshot)
                     if not _paths_allowed(changed, stage["allowedPaths"]):
@@ -500,7 +587,9 @@ def run_dag(*, root: Path, manifest_path: Path, live: bool, live_confirmed: bool
                     payload = git(snapshot, "rev-parse", "HEAD")
                 else:
                     payload = json.dumps({"approved": True, "stageId": stage_id}).encode()
-                record = {"stageId": stage_id, "type": stage["type"], "provider": stage.get("provider"), "inputArtifactSha256": input_hash, "artifactSha256": sha256_bytes(payload), "artifactFiles": artifact_files if stage["type"] in AGENT_STAGE_TYPES else [], "accepted": True}
+                record = {"stageId": stage_id, "type": stage["type"], "provider": stage.get("provider"), "inputArtifactSha256": input_hash, "artifactSha256": sha256_bytes(payload), "artifactFiles": artifact_files, "accepted": True}
+                if test_result is not None:
+                    record["testResult"] = test_result
                 record["artifactFileSha256"] = {
                     relative: sha256_bytes((run_dir / relative).read_bytes()) for relative in record["artifactFiles"]
                 }
@@ -519,11 +608,15 @@ def run_dag(*, root: Path, manifest_path: Path, live: bool, live_confirmed: bool
     unchanged = before == after
     if not unchanged:
         status = "failed_source_changed"
-    summary = {"runId": run_id, "runDirectory": str(run_dir), "status": status, "live": live, "manifestSha256": manifest_hash, "order": order, "acceptedStages": list(accepted), "acceptedRecordSha256": accepted_record_hashes, "sourceUnchanged": unchanged, "snapshotClean": snapshot_is_clean(snapshot)}
+    summary = {"runId": run_id, "runDirectory": str(run_dir), "status": status, "live": live, "manifestSha256": manifest_hash, "order": order, "acceptedStages": list(accepted), "acceptedRecordSha256": accepted_record_hashes, "testResults": {stage_id: record["testResult"] for stage_id, record in accepted.items() if "testResult" in record}, "sourceUnchanged": unchanged, "snapshotClean": snapshot_is_clean(snapshot)}
     if "error" in locals(): summary["error"] = error
     write_once(run_dir / "source-after.json", json.dumps(asdict(after), indent=2).encode() + b"\n")
     write_once(run_dir / "summary.json", json.dumps(summary, indent=2, sort_keys=True).encode() + b"\n")
-    sheet = f"# Conductor decision sheet\n\nRun: `{run_id}`\n\nStatus: **{status}**\n\nAccepted stages: {', '.join(accepted) or 'none'}\n\nSource unchanged: `{str(unchanged).lower()}`\n"
+    test_lines = "\n".join(
+        f"- `{stage_id}`: rc={record['testResult']['returnCode']}, output `{record['testResult']['stdoutFile']}`"
+        for stage_id, record in accepted.items() if "testResult" in record
+    ) or "- none"
+    sheet = f"# Conductor decision sheet\n\nRun: `{run_id}`\n\nStatus: **{status}**\n\nAccepted stages: {', '.join(accepted) or 'none'}\n\n## Test results\n\n{test_lines}\n\nSource unchanged: `{str(unchanged).lower()}`\n"
     write_once(run_dir / "decision-sheet.md", sheet.encode())
     log.append("dag_run_finished", status=status, sourceUnchanged=unchanged)
     return summary

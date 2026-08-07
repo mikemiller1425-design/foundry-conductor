@@ -1,7 +1,7 @@
 {
   "schemaVersion": 1,
   "workflow": "generic_dag",
-  "id": "foundry-next-batch-plan",
+  "id": "foundry-package-2a-2c-isolated-batch",
   "sourceRepository": "/Users/macmini/Documents/GitHub/Foundry",
   "expectedBranch": "main",
   "expectedHead": "c1607ad3068504438281f3e667d7fef4c9cc2db2",
@@ -9,31 +9,61 @@
   "stages": [
     {
       "id": "claude-package-2a-backend", "type": "implementation", "role": "backend", "dependsOn": [],
-      "contextPaths": ["apps/api/src/nas/*.ts", "packages/contracts/src/nasCatalog.ts", "docs/03-architecture/nas-readonly-boundary-threat-model.md"],
-      "allowedPaths": ["apps/api/src/nas/*.ts", "packages/contracts/src/nasCatalog.ts"],
-      "prompt": "Implement only the already-authorized Package 2a backend contract and scanner truth in the disposable workspace, using controlled fixtures only. Never access NAS or /Volumes.",
-      "timeoutSeconds": 900, "maxAttempts": 2, "maxTurns": 30
+      "attachments": [{"path": "runs/20260807T003951Z-package-2a-final-revision-9f5b1187/revised-draft.md", "sha256": "28f1bd23ab3232d67e0df10f7518e8d9a6a986da0251dac300ac711bb2b2873d", "name": "frozen-package-2a-comprehensive-brief.md"}],
+      "contextPaths": ["apps/api/src/nas/*.ts", "packages/contracts/src/nasCatalog.ts", "packages/contracts/src/index.ts", "packages/contracts/src/commandCenter/coverage.ts", "docs/01-mission/foundry-package-2-decision-record-2026-08-06.md", "docs/01-mission/foundry-package-1b-decision-record-2026-08-05.md", "docs/03-architecture/nas-readonly-boundary-threat-model.md", "docs/03-architecture/foundry-construction-map.md", "CHANGELOG.md", "package.json", "pnpm-lock.yaml"],
+      "allowedPaths": ["packages/contracts/src/nasCatalog.ts", "packages/contracts/src/nasCatalog.test.ts", "packages/contracts/src/index.ts", "apps/api/src/nas/nasCatalogAdapter.ts", "apps/api/src/nas/nasCatalogAdapter.test.ts", "apps/api/src/nas/nasCatalogFixtureEntry.ts", "apps/api/src/nas/nasRoots.ts", "apps/api/src/nas/__fixtures__/*.ts", "apps/api/src/nas/*.ts", "docs/evidence/package-2a/**", "docs/03-architecture/nas-readonly-boundary-threat-model.md", "CHANGELOG.md"],
+      "prompt": "The attached draft is not certified or accepted evidence. The operator's present batch authorization designates its exact bytes as the frozen comprehensive Package 2a implementation brief, together with the attached authoritative Foundry decision documents. Read every handoff file and implement only Package 2a contract/scanner truth in this disposable workspace. Preserve every exclusion: no persistence, transport, API route, agent-city/frontend, construction-map or decision-record edit, NAS, /Volumes, production, Package 2b/2c/2d, or acceptance claim. CONFIGURED_NAS_ROOTS remains Object.freeze([]). Begin by recording the clean disposable baseline as required. Produce the complete confined code, proofs, completion report, threat-model append, and changelog entry. Run useful scoped checks while working, but the conductor owns the formal gates. Return pass only with inspectable tracked changes confined to allowedPaths.",
+      "timeoutSeconds": 1800, "maxAttempts": 2, "maxTurns": 50
     },
     {
       "id": "cursor-package-2c-preparation", "type": "reconnaissance", "role": "frontend", "dependsOn": ["claude-package-2a-backend"],
-      "contextPaths": ["packages/contracts/src/nasCatalog.ts", "packages/ui/package.json", "apps/agent-city/src/app/page.tsx"],
-      "prompt": "Perform read-only Package 2c frontend architecture, logic, shared-contract dependency, and fixture-plan reconnaissance. Do not integrate or claim Package 2c acceptance before Package 2a and 2b acceptance.",
-      "timeoutSeconds": 600, "maxAttempts": 2, "maxTurns": 20
+      "attachments": [{"path": "runs/20260807T003951Z-package-2a-final-revision-9f5b1187/revised-draft.md", "sha256": "28f1bd23ab3232d67e0df10f7518e8d9a6a986da0251dac300ac711bb2b2873d", "name": "frozen-package-2a-comprehensive-brief.md"}],
+      "contextPaths": ["packages/contracts/src/nasCatalog.ts", "packages/contracts/src/index.ts", "packages/ui/package.json", "apps/agent-city/src/app/page.tsx", "docs/01-mission/foundry-package-2-decision-record-2026-08-06.md", "docs/03-architecture/foundry-construction-map.md"],
+      "prompt": "Read the separate physical handoff, frozen brief and digest, authoritative Package 2 frontend rulings, and the complete resulting Claude response, changed-file manifest, and backend diff. Perform read-only Package 2c frontend architecture/logic, consumer truth-dependency, and fixture-plan preparation only. Do not edit any Foundry file. Do not claim Package 2c implementation, integration, or acceptance before separate Package 2a and 2b acceptance. Return a concrete readable preparation artifact in summary and pass with zero findings.",
+      "timeoutSeconds": 600, "maxAttempts": 2, "maxTurns": 25
     },
     {
-      "id": "codex-integration-review", "type": "review", "role": "integration", "dependsOn": ["claude-package-2a-backend", "cursor-package-2c-preparation"],
-      "contextPaths": ["apps/api/src/nas/*.ts", "packages/contracts/src/nasCatalog.ts", "docs/03-architecture/nas-readonly-boundary-threat-model.md"],
-      "prompt": "Review the complete backend diff and frontend preparation artifact for governance, security, contract truth, dependency ordering, and scope. Return actionable findings to the responsible backend provider; pass only with zero findings.",
-      "timeoutSeconds": 600, "maxAttempts": 2, "maxTurns": 25,
+      "id": "codex-package-2a-integration-review", "type": "review", "role": "integration", "dependsOn": ["claude-package-2a-backend", "cursor-package-2c-preparation"],
+      "attachments": [{"path": "runs/20260807T003951Z-package-2a-final-revision-9f5b1187/revised-draft.md", "sha256": "28f1bd23ab3232d67e0df10f7518e8d9a6a986da0251dac300ac711bb2b2873d", "name": "frozen-package-2a-comprehensive-brief.md"}],
+      "contextPaths": ["apps/api/src/nas/*.ts", "packages/contracts/src/nasCatalog.ts", "packages/contracts/src/index.ts", "packages/contracts/src/commandCenter/coverage.ts", "docs/evidence/package-2a/**", "docs/03-architecture/nas-readonly-boundary-threat-model.md", "CHANGELOG.md"],
+      "prompt": "Review the complete actual Package 2a backend diff, all changed-file artifacts, the frozen comprehensive brief, authoritative context, and Cursor's read-only Package 2c preparation. Audit every required contract, proof, security boundary, scope exclusion, completion-report claim, and frontend dependency truth. Return pass only with zero findings; otherwise return schema-valid fail with concrete actionable findings for Claude.",
+      "timeoutSeconds": 1200, "maxAttempts": 2, "maxTurns": 40,
       "repairPolicy": {
-        "role": "backend", "maxRounds": 2, "timeoutSeconds": 900, "maxTurns": 30,
-        "allowedPaths": ["apps/api/src/nas/*.ts", "packages/contracts/src/nasCatalog.ts"],
-        "prompt": "Repair only the routed Codex findings in the disposable workspace and within the exact allowed paths. No NAS, external action, or scope expansion."
+        "role": "backend", "maxRounds": 2, "timeoutSeconds": 1800, "maxTurns": 50,
+        "allowedPaths": ["packages/contracts/src/nasCatalog.ts", "packages/contracts/src/nasCatalog.test.ts", "packages/contracts/src/index.ts", "apps/api/src/nas/nasCatalogAdapter.ts", "apps/api/src/nas/nasCatalogAdapter.test.ts", "apps/api/src/nas/nasCatalogFixtureEntry.ts", "apps/api/src/nas/nasRoots.ts", "apps/api/src/nas/__fixtures__/*.ts", "apps/api/src/nas/*.ts", "docs/evidence/package-2a/**", "docs/03-architecture/nas-readonly-boundary-threat-model.md", "CHANGELOG.md"],
+        "prompt": "Read all routed Codex findings and repair every one in the disposable Package 2a workspace. Preserve the frozen brief, exact allowed paths, CONFIGURED_NAS_ROOTS empty, and every downstream/NAS/frontend/persistence exclusion. Return pass only after producing an inspectable confined repair diff."
       }
     },
+    {"id": "evidence-gate-install", "type": "test", "dependsOn": ["claude-package-2a-backend", "codex-package-2a-integration-review"], "command": ["pnpm", "install", "--frozen-lockfile"], "allowedCommands": [["pnpm", "install", "--frozen-lockfile"]], "preservePaths": ["pnpm-lock.yaml"], "timeoutSeconds": 900, "maxAttempts": 1},
+    {"id": "evidence-gate-typecheck", "type": "test", "dependsOn": ["claude-package-2a-backend", "codex-package-2a-integration-review", "evidence-gate-install"], "command": ["pnpm", "-r", "run", "typecheck"], "allowedCommands": [["pnpm", "-r", "run", "typecheck"]], "preservePaths": ["pnpm-lock.yaml"], "timeoutSeconds": 900, "maxAttempts": 1},
+    {"id": "evidence-gate-test", "type": "test", "dependsOn": ["claude-package-2a-backend", "codex-package-2a-integration-review", "evidence-gate-typecheck"], "command": ["pnpm", "-r", "run", "test"], "allowedCommands": [["pnpm", "-r", "run", "test"]], "preservePaths": ["pnpm-lock.yaml"], "timeoutSeconds": 1800, "maxAttempts": 1},
+    {"id": "evidence-gate-lint", "type": "test", "dependsOn": ["claude-package-2a-backend", "codex-package-2a-integration-review", "evidence-gate-test"], "command": ["pnpm", "lint"], "allowedCommands": [["pnpm", "lint"]], "preservePaths": ["pnpm-lock.yaml"], "timeoutSeconds": 900, "maxAttempts": 1},
+    {"id": "evidence-gate-format", "type": "test", "dependsOn": ["claude-package-2a-backend", "codex-package-2a-integration-review", "evidence-gate-lint"], "command": ["pnpm", "format"], "allowedCommands": [["pnpm", "format"]], "preservePaths": ["pnpm-lock.yaml"], "timeoutSeconds": 900, "maxAttempts": 1},
     {
-      "id": "final-human-integration-gate", "type": "human_gate", "gate": "custom", "dependsOn": ["codex-integration-review"],
-      "timeoutSeconds": 60, "maxAttempts": 1
-    }
+      "id": "claude-package-2a-completion-report", "type": "implementation", "role": "backend", "dependsOn": ["claude-package-2a-backend", "codex-package-2a-integration-review", "evidence-gate-install", "evidence-gate-typecheck", "evidence-gate-test", "evidence-gate-lint", "evidence-gate-format"],
+      "attachments": [{"path": "runs/20260807T003951Z-package-2a-final-revision-9f5b1187/revised-draft.md", "sha256": "28f1bd23ab3232d67e0df10f7518e8d9a6a986da0251dac300ac711bb2b2873d", "name": "frozen-package-2a-comprehensive-brief.md"}],
+      "contextPaths": ["docs/evidence/package-2a/completion-report.md", "docs/03-architecture/nas-readonly-boundary-threat-model.md", "CHANGELOG.md"],
+      "allowedPaths": ["docs/evidence/package-2a/completion-report.md"],
+      "prompt": "Read the frozen brief and every readable formal gate artifact. Update only docs/evidence/package-2a/completion-report.md so section 12 is satisfied with verbatim pre/post status, actual command outputs and real test counts, the exact confined changed-file account, pnpm-lock unchanged proof, supported limitations, and the exact narrowed safety statement. Do not alter code or any other file and do not claim Package 2a acceptance.",
+      "timeoutSeconds": 900, "maxAttempts": 2, "maxTurns": 30
+    },
+    {
+      "id": "codex-package-2a-final-review", "type": "review", "role": "integration", "dependsOn": ["claude-package-2a-backend", "cursor-package-2c-preparation", "codex-package-2a-integration-review", "claude-package-2a-completion-report"],
+      "attachments": [{"path": "runs/20260807T003951Z-package-2a-final-revision-9f5b1187/revised-draft.md", "sha256": "28f1bd23ab3232d67e0df10f7518e8d9a6a986da0251dac300ac711bb2b2873d", "name": "frozen-package-2a-comprehensive-brief.md"}],
+      "contextPaths": ["apps/api/src/nas/*.ts", "packages/contracts/src/nasCatalog.ts", "packages/contracts/src/nasCatalog.test.ts", "packages/contracts/src/index.ts", "docs/evidence/package-2a/completion-report.md", "docs/03-architecture/nas-readonly-boundary-threat-model.md", "CHANGELOG.md"],
+      "prompt": "Perform the final independent review of the complete accumulated backend diff, finalized evidence report, initial review/repair history, frozen brief, and Cursor preparation. Return pass only if every Package 2a requirement and proof is substantively satisfied, all evidence claims are supported, no forbidden scope changed, no frontend integration is claimed, and there are zero findings.",
+      "timeoutSeconds": 1200, "maxAttempts": 2, "maxTurns": 40,
+      "repairPolicy": {
+        "role": "backend", "maxRounds": 2, "timeoutSeconds": 1800, "maxTurns": 50,
+        "allowedPaths": ["packages/contracts/src/nasCatalog.ts", "packages/contracts/src/nasCatalog.test.ts", "packages/contracts/src/index.ts", "apps/api/src/nas/nasCatalogAdapter.ts", "apps/api/src/nas/nasCatalogAdapter.test.ts", "apps/api/src/nas/nasCatalogFixtureEntry.ts", "apps/api/src/nas/nasRoots.ts", "apps/api/src/nas/__fixtures__/*.ts", "apps/api/src/nas/*.ts", "docs/evidence/package-2a/**", "docs/03-architecture/nas-readonly-boundary-threat-model.md", "CHANGELOG.md"],
+        "prompt": "Repair every routed final Codex finding within the frozen Package 2a scope and exact allowlist. Preserve all exclusions and evidence honesty. Produce a confined inspectable repair diff and do not claim acceptance."
+      }
+    },
+    {"id": "final-gate-install", "type": "test", "dependsOn": ["claude-package-2a-backend", "codex-package-2a-integration-review", "claude-package-2a-completion-report", "codex-package-2a-final-review"], "command": ["pnpm", "install", "--frozen-lockfile"], "allowedCommands": [["pnpm", "install", "--frozen-lockfile"]], "preservePaths": ["pnpm-lock.yaml"], "timeoutSeconds": 900, "maxAttempts": 1},
+    {"id": "final-gate-typecheck", "type": "test", "dependsOn": ["claude-package-2a-backend", "codex-package-2a-integration-review", "claude-package-2a-completion-report", "codex-package-2a-final-review", "final-gate-install"], "command": ["pnpm", "-r", "run", "typecheck"], "allowedCommands": [["pnpm", "-r", "run", "typecheck"]], "preservePaths": ["pnpm-lock.yaml"], "timeoutSeconds": 900, "maxAttempts": 1},
+    {"id": "final-gate-test", "type": "test", "dependsOn": ["claude-package-2a-backend", "codex-package-2a-integration-review", "claude-package-2a-completion-report", "codex-package-2a-final-review", "final-gate-typecheck"], "command": ["pnpm", "-r", "run", "test"], "allowedCommands": [["pnpm", "-r", "run", "test"]], "preservePaths": ["pnpm-lock.yaml"], "timeoutSeconds": 1800, "maxAttempts": 1},
+    {"id": "final-gate-lint", "type": "test", "dependsOn": ["claude-package-2a-backend", "codex-package-2a-integration-review", "claude-package-2a-completion-report", "codex-package-2a-final-review", "final-gate-test"], "command": ["pnpm", "lint"], "allowedCommands": [["pnpm", "lint"]], "preservePaths": ["pnpm-lock.yaml"], "timeoutSeconds": 900, "maxAttempts": 1},
+    {"id": "final-gate-format", "type": "test", "dependsOn": ["claude-package-2a-backend", "codex-package-2a-integration-review", "claude-package-2a-completion-report", "codex-package-2a-final-review", "final-gate-lint"], "command": ["pnpm", "format"], "allowedCommands": [["pnpm", "format"]], "preservePaths": ["pnpm-lock.yaml"], "timeoutSeconds": 900, "maxAttempts": 1},
+    {"id": "final-human-integration-gate", "type": "human_gate", "gate": "custom", "dependsOn": ["codex-package-2a-final-review", "final-gate-format"], "timeoutSeconds": 60, "maxAttempts": 1}
   ]
 }

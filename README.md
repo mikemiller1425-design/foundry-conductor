@@ -137,11 +137,23 @@ acknowledgement, completion, findings-routing, and acceptance events. Downstream
 handoffs contain readable normalized responses, changed-file manifests, binary
 diffs, and safe context copies—not hashes alone.
 
+Agent stages may also declare static `attachments` with a conductor-relative
+path, canonical SHA-256, and handoff filename. Attachments are accepted only
+from beneath the conductor repository, reject traversal and symlinks, are
+hash-verified before a single append-only copy, and participate in the canonical
+handoff digest.
+
 A review can declare `repairPolicy`. A schema-valid fail with actionable findings
 is accepted for routing to the responsible provider, followed by an isolated
 bounded repair and rereview. Repairs are applied only inside the next disposable
 workspace. The loop ends on a clean pass or a declared maximum-round failure.
 Accepted artifacts are hash-verified on resume and never reinvoked.
+
+Test stages run in their own reconstructed workspace against dependency diffs.
+Their exact command must appear in `allowedCommands`; optional `preservePaths`
+remain byte-identical. The conductor rejects any tracked diff expansion while
+allowing ignored build/test artifacts, and records stdout, stderr, pre/post
+status, hashes, and return codes in the final machine summary and decision sheet.
 
 Use `tasks/generic-visible-acceptance.json` for the live read-only triad proof;
 it deliberately exercises one review-to-repair-to-rereview route and stops at an
