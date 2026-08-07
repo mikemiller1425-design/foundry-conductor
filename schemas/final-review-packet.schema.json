@@ -1,0 +1,20 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "title": "Foundry Package 2a Final Review Packet",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["verdict", "draftSha256", "ledgerSha256", "reviewedDefectIds", "allSubstantivelyResolved", "allProofsExecutable", "noBoundaryWeakened", "noNewFindings", "summary", "findings", "requiresHuman"],
+  "properties": {
+    "verdict": {"type": "string", "enum": ["pass", "fail", "blocked"]},
+    "draftSha256": {"type": "string", "pattern": "^[0-9a-f]{64}$"},
+    "ledgerSha256": {"type": "string", "pattern": "^[0-9a-f]{64}$"},
+    "reviewedDefectIds": {"type": "array", "minItems": 1, "maxItems": 18, "items": {"type": "string", "pattern": "^DEFECT-[0-9]{3}$"}},
+    "allSubstantivelyResolved": {"type": "boolean"},
+    "allProofsExecutable": {"type": "boolean"},
+    "noBoundaryWeakened": {"type": "boolean"},
+    "noNewFindings": {"type": "boolean"},
+    "summary": {"type": "string", "minLength": 1},
+    "findings": {"type": "array", "items": {"type": "object"}},
+    "requiresHuman": {"type": "boolean"}
+  }
+}

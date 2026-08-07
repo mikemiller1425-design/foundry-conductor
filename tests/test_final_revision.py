@@ -129,14 +129,28 @@ class FinalRevisionTests(unittest.TestCase):
             ledger_bytes = json.dumps(ledger, indent=2, sort_keys=True).encode() + b"\n"
             draft_hash = hashlib.sha256(draft.encode()).hexdigest()
             ledger_hash = hashlib.sha256(ledger_bytes).hexdigest()
-            responses = [
-                {"status": "drafted", "draft": draft, "closureLedger": ledger, "notes": [], "requiresHuman": False},
-                self.passing_review(draft_hash, ledger_hash), self.passing_review(draft_hash, ledger_hash),
-            ]
             calls = []
             def invoke(**kwargs):
                 calls.append(kwargs["agent"])
-                response = responses[len(calls) - 1]
+                prefix_name = kwargs["prefix"].name
+                prefix_parts = kwargs["prefix"].parts
+                if prefix_name == "author-claude":
+                    response = {"status": "drafted", "draft": draft, "notes": [], "requiresHuman": False}
+                elif "ledger" in prefix_parts:
+                    ordinal = int(prefix_name.split("-")[1])
+                    response = {"draftSha256": draft_hash, "rows": ledger[(ordinal - 1) * 18:ordinal * 18]}
+                elif "reviews" in prefix_parts:
+                    ordinal = int(prefix_name.split("-")[1])
+                    ids = list(DEFECT_IDS[(ordinal - 1) * 18:ordinal * 18])
+                    response = {
+                        "verdict": "pass", "draftSha256": draft_hash,
+                        "ledgerSha256": ledger_hash, "reviewedDefectIds": ids,
+                        "allSubstantivelyResolved": True, "allProofsExecutable": True,
+                        "noBoundaryWeakened": True, "noNewFindings": True,
+                        "summary": "packet pass", "findings": [], "requiresHuman": False,
+                    }
+                else:
+                    response = self.passing_review(draft_hash, ledger_hash)
                 kwargs["prefix"].parent.mkdir(parents=True, exist_ok=True)
                 kwargs["prefix"].with_suffix(".normalized.json").write_text(
                     json.dumps(response), encoding="utf-8"
@@ -150,7 +164,10 @@ class FinalRevisionTests(unittest.TestCase):
                     proposed_authorization_sha256=hashlib.sha256(proposed).hexdigest(),
                     live=True, live_confirmed=True,
                 )
-            self.assertEqual(["claude", "codex", "cursor"], calls)
+            self.assertEqual(18, len(calls))
+            self.assertEqual(6, calls.count("claude"))
+            self.assertEqual(6, calls.count("codex"))
+            self.assertEqual(6, calls.count("cursor"))
             self.assertEqual("ready_for_operator_decision", result["status"])
             self.assertEqual(89, result["closureRowCount"])
             self.assertEqual(draft.encode(), (Path(result["runDirectory"]) / "final" / "package-2a-authorization-prompt.md").read_bytes())

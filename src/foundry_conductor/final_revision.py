@@ -23,6 +23,16 @@ REVIEW_FIELDS = {
 }
 
 
+def _load_reusable(paths: tuple[Path, ...], validator: Any, label: str) -> tuple[dict[str, Any], Path] | None:
+    existing = [path for path in paths if path.is_file()]
+    if not existing:
+        return None
+    values = [validator(load_json(path)) for path in existing]
+    if any(value != values[0] for value in values[1:]):
+        raise ConductorError(f"conflicting reusable {label} artifacts")
+    return values[0], existing[0]
+
+
 def _validate_location(value: Any, draft_lines: list[str], label: str) -> None:
     if not isinstance(value, dict) or set(value) != LOCATION_FIELDS:
         raise ConductorError(f"{label} fields do not match the schema")
@@ -137,12 +147,9 @@ DEFECT-089. Do not omit, weaken, reinterpret, further deduplicate, or silently m
 The 89 defect blocks in the proposed authorization are authoritative inputs and must be treated
 byte-for-byte as supplied. Preserve every existing governance and scope boundary.
 
-Return the complete revised authorization prompt plus exactly 89 closure rows in DEFECT order.
-Every drafted row must be `resolved`. Each location must use one-based inclusive line numbers and
-`exactText` copied exactly from those complete revised-draft lines. The closure must identify the
-exact contract, invariant, fixture, proof, gate, or stop condition that closes the defect. Keep the
-explanation concise and state why it satisfies the corresponding required change. Do not claim a
-closure that the revised draft does not actually specify.
+Return only the complete revised authorization prompt in `draft`. Do not produce a closure ledger
+in this stage. The conductor will freeze the accepted draft hash and perform closure extraction and
+review in separate non-mutating stages. Produce the complete prompt, not a patch or commentary.
 
 <candidate sha256="{bindings['candidateSha256']}">
 {candidate}
@@ -156,6 +163,108 @@ closure that the revised draft does not actually specify.
 {proposed}
 </authoritative-proposed-authorization>
 
+Return only the structured response required by the supplied schema.
+"""
+
+
+def validate_draft_only(value: Any) -> dict[str, Any]:
+    fields = {"status", "draft", "notes", "requiresHuman"}
+    if not isinstance(value, dict) or set(value) != fields:
+        raise ConductorError("final draft response fields do not match the schema")
+    if value["status"] not in {"drafted", "blocked"} or not isinstance(value["draft"], str):
+        raise ConductorError("final draft status or draft is invalid")
+    if not isinstance(value["notes"], list) or not all(isinstance(item, str) for item in value["notes"]):
+        raise ConductorError("final draft notes are invalid")
+    if not isinstance(value["requiresHuman"], bool):
+        raise ConductorError("final draft requiresHuman is invalid")
+    if value["status"] == "drafted" and (not value["draft"].strip() or value["requiresHuman"]):
+        raise ConductorError("accepted final draft requires content and requiresHuman=false")
+    return value
+
+
+def validate_ledger_packet(value: Any, draft: str, draft_hash: str, expected_ids: tuple[str, ...]) -> dict[str, Any]:
+    if not isinstance(value, dict) or set(value) != {"draftSha256", "rows"}:
+        raise ConductorError("closure ledger packet fields do not match the schema")
+    if value["draftSha256"] != draft_hash:
+        raise ConductorError("closure ledger packet draft digest mismatch")
+    rows = value["rows"]
+    if not isinstance(rows, list) or [row.get("defectId") if isinstance(row, dict) else None for row in rows] != list(expected_ids):
+        raise ConductorError("closure ledger packet defect IDs do not match its assigned range")
+    # Reuse the full validator by padding only after structural validation would be unsafe;
+    # validate each packet row directly against its immutable draft locations instead.
+    draft_lines = draft.splitlines()
+    for index, row in enumerate(rows, start=1):
+        if not isinstance(row, dict) or set(row) != ROW_FIELDS:
+            raise ConductorError(f"closure ledger packet row {index} fields do not match the schema")
+        if row["status"] not in {"resolved", "unresolved"}:
+            raise ConductorError(f"closure ledger {row['defectId']} status is invalid")
+        _validate_location(row["revisedDraftLocation"], draft_lines, f"{row['defectId']} revised location")
+        closure = row["closure"]
+        if not isinstance(closure, dict) or set(closure) != {"kind", "location"} or closure["kind"] not in {"contract", "invariant", "fixture", "proof", "gate", "stop_condition"}:
+            raise ConductorError(f"closure ledger {row['defectId']} closure is invalid")
+        _validate_location(closure["location"], draft_lines, f"{row['defectId']} closure location")
+        if not isinstance(row["explanation"], str) or not row["explanation"].strip() or len(row["explanation"]) > 800:
+            raise ConductorError(f"closure ledger {row['defectId']} explanation is invalid")
+    return value
+
+
+def validate_review_packet(value: Any, draft_hash: str, ledger_hash: str, expected_ids: tuple[str, ...]) -> dict[str, Any]:
+    fields = {"verdict", "draftSha256", "ledgerSha256", "reviewedDefectIds", "allSubstantivelyResolved", "allProofsExecutable", "noBoundaryWeakened", "noNewFindings", "summary", "findings", "requiresHuman"}
+    if not isinstance(value, dict) or set(value) != fields:
+        raise ConductorError("final review packet fields do not match the schema")
+    if value["draftSha256"] != draft_hash or value["ledgerSha256"] != ledger_hash:
+        raise ConductorError("final review packet digest mismatch")
+    if value["reviewedDefectIds"] != list(expected_ids):
+        raise ConductorError("final review packet defect coverage mismatch")
+    if value["verdict"] not in {"pass", "fail", "blocked"} or not isinstance(value["summary"], str) or not value["summary"]:
+        raise ConductorError("final review packet verdict or summary is invalid")
+    confirmations = ("allSubstantivelyResolved", "allProofsExecutable", "noBoundaryWeakened", "noNewFindings")
+    if not all(isinstance(value[field], bool) for field in confirmations) or not isinstance(value["requiresHuman"], bool) or not isinstance(value["findings"], list):
+        raise ConductorError("final review packet confirmation fields are invalid")
+    if value["verdict"] == "pass" and (not all(value[field] for field in confirmations) or value["findings"] or value["requiresHuman"]):
+        raise ConductorError("final review packet pass requires complete confirmations and zero findings")
+    if value["verdict"] != "pass" and not value["findings"] and not value["requiresHuman"]:
+        raise ConductorError("non-pass final review packet requires findings or human decision")
+    return value
+
+
+def _ledger_prompt(draft: str, draft_hash: str, defects: list[dict[str, Any]]) -> str:
+    ids = [item["defectId"] for item in defects]
+    return f"""You are Claude performing non-mutating closure-ledger extraction for one bounded
+packet. Do not revise, rewrite, or propose replacement text for the frozen draft. Do not edit files,
+access /Volumes, invoke another model, implement, commit, push, or perform external actions.
+
+Frozen draft SHA-256: {draft_hash}
+Assigned defect IDs, in required output order: {json.dumps(ids)}
+
+For each assigned defect, determine whether the frozen draft substantively closes its exact
+requiredChange. Return one row per assigned ID. Use one-based inclusive line locations with
+exactText copied exactly from complete draft lines. Use `unresolved` rather than inventing or
+stretching a closure. This stage may describe only the frozen draft; it may not mutate it.
+
+<assigned-defects>{json.dumps(defects, indent=2, sort_keys=True)}</assigned-defects>
+<frozen-draft sha256="{draft_hash}">{draft}</frozen-draft>
+Return only the structured response required by the supplied schema.
+"""
+
+
+def _review_packet_prompt(reviewer: str, draft: str, draft_hash: str, ledger_hash: str, defects: list[dict[str, Any]], rows: list[dict[str, Any]]) -> str:
+    ids = [item["defectId"] for item in defects]
+    return f"""You are the {reviewer} independent reviewer for one bounded final-closure packet.
+Do not modify the frozen draft or ledger. Work read-only; do not access /Volumes, invoke another
+model, implement, commit, push, or perform external actions.
+
+Audit the complete frozen draft for the assigned defects and their exact ledger rows. Confirm each
+requiredChange is substantively resolved, proofs are executable and sufficiently specified, no
+boundary was weakened, and no new finding was introduced. Copy hashes and assigned IDs exactly.
+Use pass only with all confirmations true, zero findings, and requiresHuman=false.
+
+Draft SHA-256: {draft_hash}
+Ledger SHA-256: {ledger_hash}
+Assigned IDs: {json.dumps(ids)}
+<assigned-defects>{json.dumps(defects, indent=2, sort_keys=True)}</assigned-defects>
+<assigned-ledger-rows>{json.dumps(rows, indent=2, sort_keys=True)}</assigned-ledger-rows>
+<complete-frozen-draft>{draft}</complete-frozen-draft>
 Return only the structured response required by the supplied schema.
 """
 
@@ -249,14 +358,18 @@ def run_final_revision(
             candidate = candidate_path.read_text(encoding="utf-8")
             inventory = inventory_path.read_text(encoding="utf-8")
             proposed = proposed_path.read_text(encoding="utf-8")
-            prior_author = resume_dir / "author-claude.normalized.json" if resume_dir else None
-            if prior_author is not None and prior_author.is_file():
-                revision = validate_final_revision_response(load_json(prior_author))
+            reusable_author = _load_reusable(
+                tuple(resume_dir / name for name in ("author-claude.normalized.json", "author-import.json")) if resume_dir else tuple(),
+                validate_draft_only, "final author",
+            )
+            if reusable_author is not None:
+                revision, prior_author = reusable_author
                 import_record = {
                     "resumeRunId": resume_run_id,
                     "normalizedSha256": sha256_bytes(prior_author.read_bytes()),
                 }
-                write_once(run_dir / "author-import.json", json.dumps(import_record, indent=2, sort_keys=True).encode() + b"\n")
+                write_once(run_dir / "author-import.json", json.dumps(revision, indent=2, sort_keys=True).encode() + b"\n")
+                write_once(run_dir / "author-import-evidence.json", json.dumps(import_record, indent=2, sort_keys=True).encode() + b"\n")
                 log.append("final_author_imported", **import_record)
             else:
                 if resume_dir is not None and (resume_dir / "author-claude.stdout").is_file():
@@ -264,23 +377,52 @@ def run_final_revision(
                 revision = _invoke(
                     agent="claude", snapshot=snapshot,
                     prompt=_author_prompt(candidate, inventory, proposed, bindings),
-                    schema_path=root / "schemas" / "final-revision-result.schema.json",
-                    validator=validate_final_revision_response,
+                    schema_path=root / "schemas" / "final-draft-only.schema.json",
+                    validator=validate_draft_only,
                     prefix=run_dir / "author-claude", timeout_seconds=task["timeoutSeconds"],
                     max_turns=task["authorMaxTurns"], log=log,
                 )
             if revision["status"] != "drafted":
                 raise ConductorError("Claude blocked the final revision")
             draft = revision["draft"]
-            ledger = revision["closureLedger"]
+            draft_bytes = draft.encode()
+            draft_hash = sha256_bytes(draft_bytes)
+            write_once(run_dir / "revised-draft.md", draft_bytes)
+            draft_record = {"draftSha256": draft_hash, "accepted": True}
+            write_once(run_dir / "draft-validation.json", json.dumps(draft_record, indent=2, sort_keys=True).encode() + b"\n")
+            log.append("final_draft_accepted", **draft_record)
+
+            defect_values = inventory_value["defects"]
+            packets = [defect_values[index:index + 18] for index in range(0, 89, 18)]
+            ledger: list[dict[str, Any]] = []
+            for ordinal, defects in enumerate(packets, start=1):
+                expected_ids = tuple(item["defectId"] for item in defects)
+                prefix = run_dir / "ledger" / f"packet-{ordinal:02d}-claude"
+                validator = lambda value, ids=expected_ids: validate_ledger_packet(value, draft, draft_hash, ids)
+                reusable_packet = _load_reusable(
+                    tuple(resume_dir / "ledger" / name for name in (f"packet-{ordinal:02d}-claude.normalized.json", f"packet-{ordinal:02d}-claude-import.json")) if resume_dir else tuple(),
+                    validator, f"closure packet {ordinal}",
+                )
+                if reusable_packet is not None:
+                    packet_result, prior_packet = reusable_packet
+                    write_once(prefix.with_name(prefix.name + "-import.json"), json.dumps(packet_result, indent=2, sort_keys=True).encode() + b"\n")
+                    log.append("closure_packet_imported", packet=ordinal, resumeRunId=resume_run_id, normalizedSha256=sha256_bytes(prior_packet.read_bytes()))
+                else:
+                    packet_result = _invoke(
+                        agent="claude", snapshot=snapshot,
+                        prompt=_ledger_prompt(draft, draft_hash, defects),
+                        schema_path=root / "schemas" / "closure-ledger-packet.schema.json",
+                        validator=validator, prefix=prefix,
+                        timeout_seconds=task["timeoutSeconds"], max_turns=task["authorMaxTurns"], log=log,
+                    )
+                ledger.extend(packet_result["rows"])
+                log.append("closure_packet_validated", packet=ordinal, defectIds=list(expected_ids), draftSha256=draft_hash)
             validate_closure_ledger(ledger, draft)
             if any(row["status"] != "resolved" for row in ledger):
-                raise ConductorError("closure ledger contains unresolved defects")
-            draft_bytes = draft.encode()
+                unresolved = [row["defectId"] for row in ledger if row["status"] != "resolved"]
+                raise ConductorError("closure ledger contains unresolved defects: " + ", ".join(unresolved))
             ledger_bytes = json.dumps(ledger, indent=2, sort_keys=True).encode() + b"\n"
-            draft_hash = sha256_bytes(draft_bytes)
             ledger_hash = sha256_bytes(ledger_bytes)
-            write_once(run_dir / "revised-draft.md", draft_bytes)
             write_once(run_dir / "closure-ledger.json", ledger_bytes)
             closure_record = {"rowCount": 89, "resolvedCount": 89, "draftSha256": draft_hash, "ledgerSha256": ledger_hash}
             write_once(run_dir / "closure-validation.json", json.dumps(closure_record, indent=2, sort_keys=True).encode() + b"\n")
@@ -288,24 +430,57 @@ def run_final_revision(
             verdicts: dict[str, dict[str, Any]] = {}
             ledger_text = ledger_bytes.decode()
             for reviewer in task["reviewers"]:
-                prior_review = resume_dir / f"review-{reviewer}.normalized.json" if resume_dir else None
-                if prior_review is not None and prior_review.is_file():
-                    review = validate_final_review(load_json(prior_review))
+                packet_attestations: list[dict[str, Any]] = []
+                for ordinal, defects in enumerate(packets, start=1):
+                    expected_ids = tuple(item["defectId"] for item in defects)
+                    rows = [row for row in ledger if row["defectId"] in expected_ids]
+                    prefix = run_dir / "reviews" / reviewer / f"packet-{ordinal:02d}"
+                    validator = lambda value, ids=expected_ids: validate_review_packet(value, draft_hash, ledger_hash, ids)
+                    reusable_packet = _load_reusable(
+                        tuple(resume_dir / "reviews" / reviewer / name for name in (f"packet-{ordinal:02d}.normalized.json", f"packet-{ordinal:02d}-import.json")) if resume_dir else tuple(),
+                        validator, f"{reviewer} review packet {ordinal}",
+                    )
+                    if reusable_packet is not None:
+                        packet_review, prior_packet = reusable_packet
+                        write_once(prefix.with_name(prefix.name + "-import.json"), json.dumps(packet_review, indent=2, sort_keys=True).encode() + b"\n")
+                        log.append("final_review_packet_imported", reviewer=reviewer, packet=ordinal, resumeRunId=resume_run_id, normalizedSha256=sha256_bytes(prior_packet.read_bytes()))
+                    else:
+                        packet_review = _invoke(
+                            agent=reviewer, snapshot=snapshot,
+                            prompt=_review_packet_prompt(reviewer, draft, draft_hash, ledger_hash, defects, rows),
+                            schema_path=root / "schemas" / "final-review-packet.schema.json",
+                            validator=validator, prefix=prefix,
+                            timeout_seconds=task["timeoutSeconds"], max_turns=task["reviewerMaxTurns"], log=log,
+                        )
+                    if packet_review["verdict"] != "pass":
+                        raise ConductorError(f"{reviewer} did not pass final review packet {ordinal}")
+                    packet_attestations.append(packet_review)
+                    log.append("final_review_packet_passed", reviewer=reviewer, packet=ordinal, defectIds=list(expected_ids), draftSha256=draft_hash, ledgerSha256=ledger_hash)
+                covered_ids = [defect_id for result in packet_attestations for defect_id in result["reviewedDefectIds"]]
+                if covered_ids != list(DEFECT_IDS):
+                    raise ConductorError(f"{reviewer} packet attestations do not cover all 89 defects exactly once")
+
+                reusable_review = _load_reusable(
+                    tuple(resume_dir / name for name in (f"aggregate-review-{reviewer}.normalized.json", f"aggregate-review-{reviewer}-import.json")) if resume_dir else tuple(),
+                    validate_final_review, f"{reviewer} aggregate review",
+                )
+                if reusable_review is not None:
+                    review, prior_review = reusable_review
                     import_record = {
                         "resumeRunId": resume_run_id, "reviewer": reviewer,
                         "normalizedSha256": sha256_bytes(prior_review.read_bytes()),
                     }
-                    write_once(run_dir / f"review-{reviewer}-import.json", json.dumps(review, indent=2, sort_keys=True).encode() + b"\n")
+                    write_once(run_dir / f"aggregate-review-{reviewer}-import.json", json.dumps(review, indent=2, sort_keys=True).encode() + b"\n")
                     log.append("final_review_imported", **import_record)
                 else:
-                    if resume_dir is not None and (resume_dir / f"review-{reviewer}.stdout").is_file():
-                        raise ConductorError(f"{reviewer} final review attempt already exists and is not reusable")
+                    aggregate_context = json.dumps(packet_attestations, indent=2, sort_keys=True)
                     review = _invoke(
                         agent=reviewer, snapshot=snapshot,
-                        prompt=_review_prompt(reviewer, draft, draft_hash, ledger_text, ledger_hash),
+                        prompt=_review_prompt(reviewer, draft, draft_hash, ledger_text, ledger_hash)
+                        + "\n<validated-packet-attestations>\n" + aggregate_context + "\n</validated-packet-attestations>\n",
                         schema_path=root / "schemas" / "final-revision-review.schema.json",
                         validator=validate_final_review,
-                        prefix=run_dir / f"review-{reviewer}", timeout_seconds=task["timeoutSeconds"],
+                        prefix=run_dir / f"aggregate-review-{reviewer}", timeout_seconds=task["timeoutSeconds"],
                         max_turns=task["reviewerMaxTurns"], log=log,
                     )
                 if review["draftSha256"] != draft_hash or review["ledgerSha256"] != ledger_hash:
