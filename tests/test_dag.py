@@ -9,7 +9,7 @@ from pathlib import Path
 from unittest.mock import patch
 
 from foundry_conductor.core import AgentCommand, ConductorError, fingerprint_repo
-from foundry_conductor.dag import run_dag, topological_order, validate_manifest
+from foundry_conductor.dag import interact, run_dag, topological_order, validate_manifest
 
 
 def command(repo: Path, *argv: str) -> None:
@@ -124,6 +124,20 @@ class DagTests(unittest.TestCase):
             approval.write_text(json.dumps({"stageId": "release-gate", "decision": "approve", "message": "approved"}))
             resumed = run_dag(root=root, manifest_path=path, live=True, live_confirmed=True, resume_run_id=waiting["runId"])
             self.assertEqual("complete", resumed["status"])
+
+    def test_status_message_refuse_and_evidence_are_append_only(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary); repo = self.repo(root)
+            path = root / "manifest.json"; path.write_text(json.dumps(self.manifest(repo)))
+            planned = run_dag(root=root, manifest_path=path, live=False, live_confirmed=False)
+            self.assertEqual("planned", interact(root=root, run_id=planned["runId"], action="status")["status"])
+            message = interact(root=root, run_id=planned["runId"], action="message", message="operator context")
+            self.assertRegex(message["sha256"], r"^[0-9a-f]{64}$")
+            refused = interact(root=root, run_id=planned["runId"], action="refuse", stage_id="security-review", message="no")
+            self.assertEqual("refuse", refused["decision"])
+            evidence = interact(root=root, run_id=planned["runId"], action="evidence")
+            self.assertTrue(any(name.startswith("messages/") for name in evidence["files"]))
+            self.assertIn("approvals/security-review.json", evidence["files"])
 
 
 if __name__ == "__main__": unittest.main()
