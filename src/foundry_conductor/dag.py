@@ -588,7 +588,18 @@ def run_dag(*, root: Path, manifest_path: Path, live: bool, live_confirmed: bool
     resume_dir = (root / "runs" / resume_run_id).resolve() if resume_run_id else None
     if resume_dir is not None and (resume_dir.parent != (root / "runs").resolve() or not resume_dir.is_dir()):
         raise ConductorError("generic resume run does not exist")
-    resume_summary = load_json(resume_dir / "summary.json") if resume_dir else None
+    resume_summary = load_json(resume_dir / "summary.json") if resume_dir and (resume_dir / "summary.json").is_file() else None
+    if resume_dir is not None and resume_summary is None:
+        preserved_manifest = load_json(resume_dir / "manifest.json")
+        preserved_hash = sha256_bytes(json.dumps(preserved_manifest, sort_keys=True, separators=(",", ":")).encode())
+        if preserved_hash != manifest_hash:
+            raise ConductorError("crash resume run uses a different generic manifest")
+        recovered_hashes = {
+            path.parent.name: sha256_bytes(path.read_bytes())
+            for path in sorted((resume_dir / "stages").glob("*/accepted.json"))
+        }
+        resume_summary = {"manifestSha256": manifest_hash, "acceptedRecordSha256": recovered_hashes}
+        log.append("crash_resume_index_recovered", resumeRunId=resume_run_id, acceptedStages=sorted(recovered_hashes))
     if resume_summary is not None and resume_summary.get("manifestSha256") != manifest_hash:
         raise ConductorError("resume run uses a different generic manifest")
     accepted_record_hashes: dict[str, str] = {}

@@ -133,6 +133,26 @@ class DagTests(unittest.TestCase):
             imported = Path(second["runDirectory"]) / "stages" / "backend-read" / "attempt-01.normalized.json"
             self.assertTrue(imported.is_file()); self.assertEqual("backend-read", json.loads(imported.read_text())["summary"])
 
+    def test_crash_resume_recovers_only_immutable_accepted_records(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary); repo = self.repo(root)
+            manifest = self.manifest(repo); manifest["stages"] = manifest["stages"][:1]
+            path = root / "manifest.json"; path.write_text(json.dumps(manifest))
+            calls = 0
+            def build(stage, snapshot, prompt, schema): return AgentCommand("claude", "fake", ["fake", prompt])
+            def execute(argv, **kwargs):
+                nonlocal calls
+                if argv[0] == "git": return real_run_command(argv, **kwargs)
+                calls += 1; digest = re.search(r"Canonical handoff SHA-256: ([0-9a-f]{64})", argv[1]).group(1)
+                value = {"status": "pass", "handoffSha256": digest, "workStarted": True, "summary": "accepted", "findings": [], "requiresHuman": False}
+                return subprocess.CompletedProcess(argv, 0, json.dumps(value).encode(), b"")
+            with patch("foundry_conductor.dag._build_stage_command", side_effect=build), patch("foundry_conductor.dag.run_command", side_effect=execute):
+                first = run_dag(root=root, manifest_path=path, live=True, live_confirmed=True)
+            (Path(first["runDirectory"]) / "summary.json").unlink()
+            with patch("foundry_conductor.dag._build_stage_command") as reinvoke:
+                resumed = run_dag(root=root, manifest_path=path, live=True, live_confirmed=True, resume_run_id=first["runId"])
+            reinvoke.assert_not_called(); self.assertEqual("complete", resumed["status"]); self.assertEqual(1, calls)
+
     def test_write_path_violation_fails_closed(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:
             root = Path(temporary); repo = self.repo(root)
