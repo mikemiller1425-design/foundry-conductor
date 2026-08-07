@@ -1,8 +1,10 @@
 # Foundry Conductor
 
-Foundry Conductor is a standalone local orchestration tool for Claude Code,
-Cursor Agent, and Codex. Version 0.1 is deliberately limited to **read-only**
-tasks.
+Foundry Conductor is a standalone manifest-driven DAG orchestrator for Claude
+Code, Cursor Agent, and Codex. The generic runner supports read-only discovery,
+controlled writes in disposable Git snapshots, independent review, repair,
+tests, isolated local commits, explicit human gates, and accepted-artifact
+resume. It never pushes.
 
 It never gives an agent the live Foundry checkout as its working directory.
 Instead, it exports the accepted Git `HEAD` into a disposable tracked-file
@@ -11,12 +13,14 @@ databases, mounted volumes, and Git history are excluded from that snapshot.
 
 ## Safety boundary
 
-Version 0.1 rejects any task that permits:
+The generic runner defaults every irreversible or external permission to false:
 
-- repository writes;
-- NAS access;
-- pushes; or
-- any mode other than `read_only`.
+- NAS access, external actions, spending, destructive operations, and
+  production execution require a manifest-declared human gate;
+- push is never executed by the conductor;
+- controlled-write stages operate only in a disposable snapshot and are
+  checked against their exact `allowedPaths` after execution;
+- test commands must exactly match a manifest `allowedCommands` entry.
 
 Live model calls require both a task policy that permits them and the explicit
 `--live --confirm-live-models` command-line flags. Running without `--live`
@@ -31,17 +35,30 @@ used as an agent working directory and by before/after Git-state verification.
 ```sh
 cd /Users/macmini/Documents/GitHub/foundry-conductor
 
-# Check the accepted baseline, required CLIs, and authentication. No model calls.
-./foundryctl doctor
+# Generic DAG doctor. No model calls.
+./foundryctl doctor generic-triad-smoke
 
 # Create a disposable snapshot, command plan, and evidence record. No model calls.
-./foundryctl plan
+./foundryctl plan generic-triad-smoke
 
 # Same safe default as plan.
-./foundryctl run
+./foundryctl run generic-triad-smoke
 
 # Future explicit connectivity probe. May consume provider/account usage.
-./foundryctl run --live --confirm-live-models
+./foundryctl run generic-triad-smoke --live --confirm-live-models
+
+# Inspect a run or its immutable evidence.
+./foundryctl status <run-id>
+./foundryctl evidence <run-id>
+
+# Append operator context or decide an explicitly declared gate.
+./foundryctl message <run-id> "context for the next stage"
+./foundryctl approve <run-id> <stage-id> --message "approved boundary"
+./foundryctl refuse <run-id> <stage-id> --message "refused boundary"
+
+# Resume without repeating accepted stages.
+./foundryctl resume generic-triad-smoke --from-run <run-id> \
+  --live --confirm-live-models
 
 # Bounded read-only Package 2a prompt reconciliation.
 ./foundryctl reconcile
@@ -86,7 +103,40 @@ snapshot/             disposable tracked-file export
 responses/            immutable stdout/stderr records for live runs
                       plus schema-validated normalized JSON on success
 summary.json          final machine-readable result
+decision-sheet.md     concise operator-facing status
+stages/*/accepted.json immutable accepted-stage artifacts and hashes
+messages/             append-only operator messages
+approvals/            append-only human gate decisions
 ```
+
+## Generic manifest
+
+Set `workflow` to `generic_dag` and declare a DAG in `stages`. Dependencies are
+topologically ordered and their accepted artifact hashes are injected into the
+next stage automatically. Accepted stages are never invoked again on resume.
+
+Stage types are `reconnaissance`, `implementation`, `review`, `repair`, `test`,
+`commit`, and `human_gate`. Implementation and repair require `allowedPaths`;
+test requires an exact `command` also present in `allowedCommands`.
+
+Provider routing is adapter-neutral. A stage may set `provider` explicitly.
+Otherwise the role policy is:
+
+- Claude: `backend`, `general`, `implementation`;
+- Cursor: `frontend`, `contract`, `contract_dependency`;
+- Codex: `governance`, `security`, `review`, `integration`.
+
+A bounded implement-review-repair-test flow is expressed as ordinary dependent
+stages, each with `maxAttempts` and `timeoutSeconds`. Review prompts receive the
+exact accepted dependency hashes, preventing review of a different artifact.
+See `tasks/generic-triad-smoke.json` for a minimal read-only triad example.
+
+## Profiles
+
+The generic DAG runner lives in `foundry_conductor.dag` and is the default
+reusable product. Package-specific reconciliation, defect inventory, and the
+89-defect certified-authorization machinery are isolated historical profiles;
+they do not alter generic manifest semantics or provider routing.
 
 The `runs/` directory is ignored by Git because it may contain large or
 sensitive model responses. Preserve or archive selected evidence deliberately.
@@ -116,12 +166,12 @@ not enter snapshots, snapshot creation leaves the source fingerprint unchanged,
 Codex commands target the snapshot with a read-only sandbox, and Cursor is
 forced into plan mode with its sandbox enabled.
 
-## Next authorization boundary
+## Human-only boundaries
 
-Do not add write-mode tasks yet. The next step after all three CLI probes pass
-is a separately authorized, controlled-write design using isolated worktrees,
-allowed-path enforcement, bounded repair rounds, independent review, and no
-automatic push.
+Push remains manual and outside the runner. NAS access, external actions,
+spending, destructive operations, and production execution require an explicit
+manifest gate and an append-only `approve` decision. The bundled smoke manifest
+declares none of them and cannot perform them.
 
 ## Phase 0.2 reconciliation
 

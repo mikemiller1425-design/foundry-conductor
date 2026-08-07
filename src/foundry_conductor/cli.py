@@ -8,6 +8,7 @@ from pathlib import Path
 from .core import ConductorError, doctor, execute_task, load_json
 from .inventory import run_defect_inventory
 from .final_revision import run_final_revision
+from .dag import doctor_dag, interact, run_dag
 from .reconcile import run_reconciliation
 
 
@@ -31,7 +32,7 @@ def task_path(root: Path, task: str) -> Path:
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
         prog="foundryctl",
-        description="Policy-gated Foundry agent conductor (read-only phase)",
+        description="Policy-gated manifest DAG conductor for Claude, Cursor, and Codex",
     )
     subcommands = parser.add_subparsers(dest="command", required=True)
 
@@ -49,6 +50,23 @@ def build_parser() -> argparse.ArgumentParser:
         action="store_true",
         help="confirm that live model calls may consume account/API usage",
     )
+    status_parser = subcommands.add_parser("status", help="show a machine-readable run status")
+    status_parser.add_argument("run_id")
+    evidence_parser = subcommands.add_parser("evidence", help="list immutable evidence for a run")
+    evidence_parser.add_argument("run_id")
+    message_parser = subcommands.add_parser("message", help="append an operator message to a run")
+    message_parser.add_argument("run_id")
+    message_parser.add_argument("text")
+    for decision in ("approve", "refuse"):
+        decision_parser = subcommands.add_parser(decision, help=f"append an operator {decision} decision")
+        decision_parser.add_argument("run_id")
+        decision_parser.add_argument("stage_id")
+        decision_parser.add_argument("--message", default="")
+    resume_parser = subcommands.add_parser("resume", help="resume a generic DAG from accepted artifacts")
+    resume_parser.add_argument("manifest")
+    resume_parser.add_argument("--from-run", required=True)
+    resume_parser.add_argument("--live", action="store_true")
+    resume_parser.add_argument("--confirm-live-models", action="store_true")
 
     reconcile_parser = subcommands.add_parser(
         "reconcile",
@@ -143,6 +161,22 @@ def main(argv: list[str] | None = None) -> int:
     args = parser.parse_args(argv)
     root = project_root()
     try:
+        if args.command in {"status", "evidence", "message", "approve", "refuse"}:
+            result = interact(
+                root=root, run_id=args.run_id, action=args.command,
+                stage_id=getattr(args, "stage_id", None),
+                message=getattr(args, "text", None) or getattr(args, "message", None),
+            )
+            print(json.dumps(result, indent=2, sort_keys=True))
+            return 0
+        if args.command == "resume":
+            selected_manifest = task_path(root, args.manifest)
+            result = run_dag(
+                root=root, manifest_path=selected_manifest, live=args.live,
+                live_confirmed=args.confirm_live_models, resume_run_id=args.from_run,
+            )
+            print(json.dumps(result, indent=2, sort_keys=True))
+            return 0 if result["status"] in {"complete", "planned", "waiting_for_approval"} else 3
         selected_task = task_path(root, args.task)
         if args.command == "final-revision":
             result = run_final_revision(
@@ -170,7 +204,8 @@ def main(argv: list[str] | None = None) -> int:
             print(json.dumps(result, indent=2, sort_keys=True))
             return 0 if result["status"] in {"planned", "ready_for_operator_decision"} else 3
         if args.command == "doctor":
-            result = doctor(load_json(selected_task))
+            task_value = load_json(selected_task)
+            result = doctor_dag(task_value) if task_value.get("workflow") == "generic_dag" else doctor(task_value)
             print(json.dumps(result, indent=2, sort_keys=True))
             return 0 if result["ok"] else 2
         if args.command == "reconcile":
@@ -190,19 +225,11 @@ def main(argv: list[str] | None = None) -> int:
             print(json.dumps(result, indent=2, sort_keys=True))
             return 0 if result["status"] in {"planned", "ready_for_operator_decision"} else 3
         if args.command == "plan":
-            result = execute_task(
-                root=root,
-                task_path=selected_task,
-                live=False,
-                live_confirmed=False,
-            )
+            task_value = load_json(selected_task)
+            result = run_dag(root=root, manifest_path=selected_task, live=False, live_confirmed=False) if task_value.get("workflow") == "generic_dag" else execute_task(root=root, task_path=selected_task, live=False, live_confirmed=False)
         else:
-            result = execute_task(
-                root=root,
-                task_path=selected_task,
-                live=args.live,
-                live_confirmed=args.confirm_live_models,
-            )
+            task_value = load_json(selected_task)
+            result = run_dag(root=root, manifest_path=selected_task, live=args.live, live_confirmed=args.confirm_live_models) if task_value.get("workflow") == "generic_dag" else execute_task(root=root, task_path=selected_task, live=args.live, live_confirmed=args.confirm_live_models)
         print(json.dumps(result, indent=2, sort_keys=True))
         return 0
     except ConductorError as exc:
