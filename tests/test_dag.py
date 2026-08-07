@@ -284,6 +284,21 @@ class DagTests(unittest.TestCase):
             self.assertIn("new.txt", changed)
             self.assertIn(b"new model artifact", patch_bytes)
 
+    def test_canonical_dependency_diff_is_applied_before_context_copy(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary); repo = self.repo(root)
+            producer = root / "producer"; real_run_command(["git", "clone", "-q", str(repo), str(producer)], cwd=root)
+            (producer / "new-contract.ts").write_text("export const value = 1;\n")
+            _, patch_bytes = _workspace_patch(producer)
+            patch_path = root / "stages" / "producer" / "diff.patch"
+            patch_path.parent.mkdir(parents=True); patch_path.write_bytes(patch_bytes)
+            workspace = root / "consumer"; real_run_command(["git", "clone", "-q", str(repo), str(workspace)], cwd=root)
+            accepted = {"producer": {"stageId": "producer", "artifactSha256": "a" * 64, "artifactFiles": [str(patch_path.relative_to(root))]}}
+            stage = {"id": "consumer", "dependsOn": ["producer"], "contextPaths": ["new-contract.ts"]}
+            handoff, _, _ = _build_handoff(run_dir=root, workspace=workspace, stage=stage, accepted=accepted, instructions="inspect")
+            self.assertEqual("export const value = 1;\n", (workspace / "new-contract.ts").read_text())
+            self.assertEqual((workspace / "new-contract.ts").read_bytes(), (handoff / "context" / "new-contract.ts").read_bytes())
+
     def test_controlled_write_cannot_pass_without_artifact(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:
             root = Path(temporary); repo = self.repo(root)

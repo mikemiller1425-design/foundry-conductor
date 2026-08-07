@@ -408,7 +408,7 @@ def _build_handoff(
             data = source.read_bytes()
             write_once(target, data)
             files.append({"path": str(target.relative_to(handoff)), "sha256": sha256_bytes(data)})
-            if target.name.endswith(".diff.patch") and data:
+            if (target.name == "diff.patch" or target.name.endswith(".diff.patch")) and data:
                 completed = run_command(["git", "apply", "--check", str(target)], cwd=workspace, check=False)
                 if completed.returncode == 0:
                     run_command(["git", "apply", str(target)], cwd=workspace)
@@ -475,27 +475,62 @@ def _materialize_workspace_seed(base_snapshot: Path, source_workspace: Path, des
     return changed, git(destination, "diff", "--cached", "--binary", "HEAD")
 
 
-def _stage_prompt(stage: dict[str, Any], handoff_hash: str, handoff_path: Path, write_allowed: bool, feedback: list[dict[str, Any]] | None = None) -> str:
+def _stage_prompt(
+    stage: dict[str, Any],
+    handoff_hash: str,
+    handoff_path: Path,
+    write_allowed: bool,
+    feedback: list[dict[str, Any]] | None = None,
+    *,
+    diagnostic: dict[str, Any] | None = None,
+    finish_reserve_seconds: int | None = None,
+    recovery_mode: str | None = None,
+) -> str:
     boundary = "Read-only: do not modify any file." if not write_allowed else (
         "Controlled-write stage in a disposable snapshot. Modify only these allowed paths: "
         + json.dumps(stage.get("allowedPaths", []))
     )
+    finish = finish_reserve_seconds if finish_reserve_seconds is not None else _finish_reserve_seconds(stage)
+    work_budget = max(1, stage["timeoutSeconds"] - finish)
+    test_policy = (
+        "Do not run package test suites, typecheck, lint, or format. The conductor owns formal gates "
+        "via exact allowedCommands. Manifest-authorized executable test commands (none means no test command): "
+        + json.dumps(stage.get("allowedCommands", []))
+    )
+    retry_block = ""
+    if diagnostic is not None:
+        retry_block = f"""
+RETRY / RECOVERY CONSTRAINTS:
+Previous attempt {diagnostic['attempt']} ended without acceptance: {diagnostic['reason']}
+Diagnostic artifact SHA-256 (NOT accepted): {diagnostic['diagnosticSha256']}
+Observed unfinished changed paths (NOT accepted): {json.dumps(diagnostic.get('changedPaths', []))}
+Do not rewrite already-validated accepted dependency artifacts.
+Complete only unfinished checkpoint work within the exact allowedPaths above.
+Do not widen allowedPaths. Do not claim acceptance of diagnostic-only work.
+"""
+    if recovery_mode in {"validate", "completion-prompt"}:
+        retry_block += (
+            "\nFINISH-AND-RETURN NOW: stop editing; serialize the required schema-valid acknowledgement "
+            f"using the exact handoff digest. Recovery mode={recovery_mode}; diagnosticSha256 must remain binding.\n"
+        )
     return f"""You are executing generic conductor stage `{stage['id']}` ({stage['type']}).
 {boundary}
 Do not access /Volumes, push, spend, perform external actions, run production, or invoke another model.
 The provider adapter's sandboxed read-only file inspection tools are permitted for the workspace and
-handoff only. Manifest-authorized executable test commands (none means no test command):
-{json.dumps(stage.get('allowedCommands', []))}
+handoff only. {test_policy}
+Work budget seconds before finish reserve: {work_budget}
+Finish reserve seconds (schema serialization only): {finish}
 Inspectable handoff folder: {handoff_path}
 Canonical handoff SHA-256: {handoff_hash}
 Read every handoff file before work. Explicitly copy this digest into `handoffSha256` and set
 `workStarted=true` only after the handoff was read and work actually started.
 Routed review findings: {json.dumps(feedback or [], sort_keys=True)}
-
+{retry_block}
 {stage.get('prompt', '')}
 
-Return only the structured response required by the supplied schema. A pass requires zero findings
-and requiresHuman=false. A review may return fail with actionable findings for automatic repair.
+Return only the structured response required by the supplied schema. Reserve the finish window solely
+for that schema-valid JSON acknowledgement. A pass requires zero findings and requiresHuman=false.
+A review may return fail with actionable findings for automatic repair.
 """
 
 
