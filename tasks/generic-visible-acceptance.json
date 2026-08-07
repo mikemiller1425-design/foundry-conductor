@@ -1,0 +1,37 @@
+{
+  "schemaVersion": 1,
+  "workflow": "generic_dag",
+  "id": "generic-visible-acceptance",
+  "sourceRepository": "/Users/macmini/Documents/GitHub/Foundry",
+  "expectedBranch": "main",
+  "expectedHead": "c1607ad3068504438281f3e667d7fef4c9cc2db2",
+  "permissions": {"push": false, "nasAccess": false, "externalActions": false, "spending": false, "destructive": false, "productionExecution": false},
+  "stages": [
+    {
+      "id": "claude-backend-handoff", "type": "reconnaissance", "role": "backend", "dependsOn": [],
+      "contextPaths": ["README.md", "apps/api/src/nas/*.ts", "packages/contracts/src/nasCatalog.ts"],
+      "prompt": "Read the physical handoff and its context files. Produce a concise backend/scanner architecture brief in summary. Do not modify files. Pass with zero findings.",
+      "timeoutSeconds": 300, "maxAttempts": 1
+    },
+    {
+      "id": "cursor-frontend-handoff", "type": "reconnaissance", "role": "frontend", "dependsOn": ["claude-backend-handoff"],
+      "contextPaths": ["packages/contracts/src/nasCatalog.ts", "packages/ui/package.json", "apps/agent-city/src/app/page.tsx"],
+      "prompt": "Read the physical handoff, the complete readable Claude dependency response, and all context files. Produce a concise frontend truth-dependency brief in summary. Explicitly state that no integration claim is made. Do not modify files. Pass with zero findings.",
+      "timeoutSeconds": 300, "maxAttempts": 1
+    },
+    {
+      "id": "codex-feedback-loop", "type": "review", "role": "integration", "dependsOn": ["claude-backend-handoff", "cursor-frontend-handoff"],
+      "contextPaths": ["apps/api/src/nas/*.ts", "packages/contracts/src/nasCatalog.ts", "apps/agent-city/src/app/page.tsx"],
+      "prompt": "Read every physical handoff file and both complete normalized provider responses. On the initial review, return fail with exactly one actionable error finding requesting a remediation attestation containing the literal ACCEPTANCE-REPAIR-ACK. On rereview, pass only if a readable repair dependency contains that exact literal and the original dependency content remains present.",
+      "timeoutSeconds": 300, "maxAttempts": 1,
+      "repairPolicy": {
+        "role": "backend", "readOnly": true, "maxRounds": 1, "timeoutSeconds": 300,
+        "prompt": "Read the routed finding and all handoff content. Return pass with zero findings and include the literal ACCEPTANCE-REPAIR-ACK in the summary as the requested read-only remediation attestation. Modify nothing."
+      }
+    },
+    {
+      "id": "final-integration-gate", "type": "human_gate", "gate": "custom", "dependsOn": ["codex-feedback-loop"],
+      "timeoutSeconds": 60, "maxAttempts": 1
+    }
+  ]
+}

@@ -105,6 +105,10 @@ responses/            immutable stdout/stderr records for live runs
 summary.json          final machine-readable result
 decision-sheet.md     concise operator-facing status
 stages/*/accepted.json immutable accepted-stage artifacts and hashes
+handoffs/<stage>/      physical canonical handoff: instructions, selected
+                      tracked context, readable dependency responses/diffs,
+                      accepted records, and manifest SHA-256
+workspaces/<stage>/    isolated per-stage Git clone of the disposable snapshot
 messages/             append-only operator messages
 approvals/            append-only human gate decisions
 ```
@@ -126,10 +130,23 @@ Otherwise the role policy is:
 - Cursor: `frontend`, `contract`, `contract_dependency`;
 - Codex: `governance`, `security`, `review`, `integration`.
 
-A bounded implement-review-repair-test flow is expressed as ordinary dependent
-stages, each with `maxAttempts` and `timeoutSeconds`. Review prompts receive the
-exact accepted dependency hashes, preventing review of a different artifact.
-See `tasks/generic-triad-smoke.json` for a minimal read-only triad example.
+A stage may declare `contextPaths` to place exact tracked files in its physical
+handoff. Every provider must return the canonical handoff digest and explicitly
+confirm work started. The conductor records provider-specific start,
+acknowledgement, completion, findings-routing, and acceptance events. Downstream
+handoffs contain readable normalized responses, changed-file manifests, binary
+diffs, and safe context copies—not hashes alone.
+
+A review can declare `repairPolicy`. A schema-valid fail with actionable findings
+is accepted for routing to the responsible provider, followed by an isolated
+bounded repair and rereview. Repairs are applied only inside the next disposable
+workspace. The loop ends on a clean pass or a declared maximum-round failure.
+Accepted artifacts are hash-verified on resume and never reinvoked.
+
+Use `tasks/generic-visible-acceptance.json` for the live read-only triad proof;
+it deliberately exercises one review-to-repair-to-rereview route and stops at an
+unapproved final integration gate. `tasks/foundry-next-batch-plan.json` is the
+prepared, non-executed Package 2a/2c dependency-correct dry-run plan.
 
 ## Profiles
 
@@ -161,10 +178,10 @@ Foundry itself.
 PYTHONPATH=src python3 -m unittest discover -s tests -v
 ```
 
-The tests prove that write permissions are rejected, untracked source files do
-not enter snapshots, snapshot creation leaves the source fingerprint unchanged,
-Codex commands target the snapshot with a read-only sandbox, and Cursor is
-forced into plan mode with its sandbox enabled.
+The tests cover DAG order, provider roles, physical handoff content and digests,
+wrong or fake acknowledgements, missing artifacts, exact path and command
+policies, read-only mutation, empty controlled writes, review/repair routing,
+exhausted rounds, accepted-artifact resume, human-gate bypass, and source safety.
 
 ## Human-only boundaries
 

@@ -4,6 +4,7 @@ import fnmatch
 import json
 import os
 import re
+import shutil
 import time
 from dataclasses import asdict
 from pathlib import Path
@@ -29,13 +30,15 @@ HIGH_RISK_PERMISSIONS = {"push", "nasAccess", "externalActions", "spending", "de
 
 
 def validate_stage_result(value: Any) -> dict[str, Any]:
-    fields = {"status", "inputArtifactSha256", "summary", "findings", "requiresHuman"}
+    fields = {"status", "handoffSha256", "workStarted", "summary", "findings", "requiresHuman"}
     if not isinstance(value, dict) or set(value) != fields:
         raise ConductorError("generic stage result fields do not match the schema")
     if value["status"] not in {"pass", "fail", "blocked"}:
         raise ConductorError("generic stage status is invalid")
-    if not isinstance(value["inputArtifactSha256"], str) or not re.fullmatch(r"[0-9a-f]{64}", value["inputArtifactSha256"]):
-        raise ConductorError("generic stage inputArtifactSha256 is invalid")
+    if not isinstance(value["handoffSha256"], str) or not re.fullmatch(r"[0-9a-f]{64}", value["handoffSha256"]):
+        raise ConductorError("generic stage handoffSha256 is invalid")
+    if value["workStarted"] is not True:
+        raise ConductorError("generic stage must explicitly acknowledge that work started")
     if not isinstance(value["summary"], str) or not value["summary"]:
         raise ConductorError("generic stage summary is invalid")
     if not isinstance(value["findings"], list) or not isinstance(value["requiresHuman"], bool):
@@ -47,6 +50,8 @@ def validate_stage_result(value: Any) -> dict[str, Any]:
             raise ConductorError("generic stage finding is invalid")
     if value["status"] == "pass" and (value["findings"] or value["requiresHuman"]):
         raise ConductorError("generic stage pass requires zero findings and requiresHuman=false")
+    if value["status"] == "fail" and not value["findings"]:
+        raise ConductorError("generic stage fail requires actionable findings")
     return value
 
 
@@ -95,6 +100,24 @@ def validate_manifest(value: Any) -> dict[str, Any]:
             stage["provider"] = provider
             if not isinstance(stage.get("prompt"), str) or not stage["prompt"]:
                 raise ConductorError(f"generic stage {stage['id']} prompt is required")
+            context_paths = stage.get("contextPaths", [])
+            if not isinstance(context_paths, list) or not all(
+                isinstance(item, str) and item and not item.startswith("/") and ".." not in Path(item).parts
+                for item in context_paths
+            ):
+                raise ConductorError(f"generic stage {stage['id']} contextPaths are invalid")
+        if stage["type"] == "review" and "repairPolicy" in stage:
+            policy = stage["repairPolicy"]
+            if not isinstance(policy, dict) or not isinstance(policy.get("maxRounds"), int) or not 1 <= policy["maxRounds"] <= 5:
+                raise ConductorError(f"review stage {stage['id']} repairPolicy is invalid")
+            provider = policy.get("provider", DEFAULT_PROVIDERS.get(policy.get("role", "implementation")))
+            if provider not in AGENT_BINARIES:
+                raise ConductorError(f"review stage {stage['id']} repair provider is invalid")
+            policy["provider"] = provider
+            if not isinstance(policy.get("prompt"), str) or not policy["prompt"]:
+                raise ConductorError(f"review stage {stage['id']} repair prompt is required")
+            if not policy.get("readOnly", False) and (not isinstance(policy.get("allowedPaths"), list) or not policy["allowedPaths"]):
+                raise ConductorError(f"review stage {stage['id']} repair requires allowedPaths")
         if stage["type"] in WRITE_STAGE_TYPES:
             if not isinstance(stage.get("allowedPaths"), list) or not stage["allowedPaths"]:
                 raise ConductorError(f"write stage {stage['id']} requires exact allowedPaths")
@@ -108,6 +131,8 @@ def validate_manifest(value: Any) -> dict[str, Any]:
         gate = stage.get("gate")
         if gate is not None and gate not in HIGH_RISK_PERMISSIONS | {"custom"}:
             raise ConductorError(f"generic stage {stage['id']} gate is invalid")
+        if gate in HIGH_RISK_PERMISSIONS and not permissions.get(gate, False):
+            raise ConductorError(f"generic stage {stage['id']} requests unauthorized permission {gate}")
     if len(ids) != len(set(ids)):
         raise ConductorError("generic stage IDs must be unique")
     known = set(ids)
@@ -152,7 +177,63 @@ def _input_manifest(stage: dict[str, Any], accepted: dict[str, dict[str, Any]]) 
     return inputs, sha256_bytes(encoded)
 
 
-def _stage_prompt(stage: dict[str, Any], inputs: dict[str, str], input_hash: str, write_allowed: bool) -> str:
+def _create_workspace(base_snapshot: Path, destination: Path) -> None:
+    run_command(["git", "clone", "-q", "--no-hardlinks", str(base_snapshot), str(destination)], cwd=base_snapshot.parent, timeout_seconds=120)
+    exclude = destination / ".git" / "info" / "exclude"
+    with exclude.open("a", encoding="utf-8") as handle:
+        handle.write("\n.conductor/\n")
+
+
+def _build_handoff(
+    *, run_dir: Path, workspace: Path, stage: dict[str, Any], accepted: dict[str, dict[str, Any]],
+    instructions: str, suffix: str = "",
+) -> tuple[Path, str, dict[str, Any]]:
+    name = stage["id"] + suffix
+    handoff = run_dir / "handoffs" / name
+    write_once(handoff / "instructions.md", instructions.encode() + b"\n")
+    files: list[dict[str, str]] = [{"path": "instructions.md", "sha256": sha256_bytes((instructions + "\n").encode())}]
+    tracked = [item.decode() for item in git(workspace, "ls-files", "-z").split(b"\0") if item]
+    for pattern in stage.get("contextPaths", []):
+        matches = sorted(path for path in tracked if fnmatch.fnmatchcase(path, pattern))
+        if not matches:
+            raise ConductorError(f"handoff contextPath matched no tracked file: {pattern}")
+        for relative in matches:
+            source = workspace / relative
+            if not source.is_file() or source.is_symlink():
+                raise ConductorError(f"handoff context file is unsafe: {relative}")
+            target = handoff / "context" / relative
+            data = source.read_bytes()
+            write_once(target, data)
+            files.append({"path": str(target.relative_to(handoff)), "sha256": sha256_bytes(data)})
+    for dependency in stage["dependsOn"]:
+        record = accepted[dependency]
+        dependency_dir = handoff / "dependencies" / dependency
+        accepted_bytes = json.dumps(record, indent=2, sort_keys=True).encode() + b"\n"
+        write_once(dependency_dir / "accepted.json", accepted_bytes)
+        files.append({"path": str((dependency_dir / "accepted.json").relative_to(handoff)), "sha256": sha256_bytes(accepted_bytes)})
+        for relative in record.get("artifactFiles", []):
+            source = run_dir / relative
+            if not source.is_file():
+                raise ConductorError(f"accepted dependency artifact is missing: {relative}")
+            target = dependency_dir / "artifacts" / Path(relative).name
+            data = source.read_bytes()
+            write_once(target, data)
+            files.append({"path": str(target.relative_to(handoff)), "sha256": sha256_bytes(data)})
+            if target.name.endswith(".diff.patch") and data:
+                completed = run_command(["git", "apply", "--check", str(target)], cwd=workspace, check=False)
+                if completed.returncode == 0:
+                    run_command(["git", "apply", str(target)], cwd=workspace)
+    manifest = {"stageId": stage["id"], "dependencies": stage["dependsOn"], "files": sorted(files, key=lambda item: item["path"])}
+    digest = sha256_bytes(json.dumps(manifest, sort_keys=True, separators=(",", ":")).encode())
+    manifest["handoffSha256"] = digest
+    write_once(handoff / "manifest.json", json.dumps(manifest, indent=2, sort_keys=True).encode() + b"\n")
+    visible = workspace / ".conductor" / "handoff"
+    visible.parent.mkdir(parents=True, exist_ok=True)
+    shutil.copytree(handoff, visible)
+    return handoff, digest, manifest
+
+
+def _stage_prompt(stage: dict[str, Any], handoff_hash: str, handoff_path: Path, write_allowed: bool, feedback: list[dict[str, Any]] | None = None) -> str:
     boundary = "Read-only: do not modify any file." if not write_allowed else (
         "Controlled-write stage in a disposable snapshot. Modify only these allowed paths: "
         + json.dumps(stage.get("allowedPaths", []))
@@ -161,13 +242,16 @@ def _stage_prompt(stage: dict[str, Any], inputs: dict[str, str], input_hash: str
 {boundary}
 Do not access /Volumes, push, spend, perform external actions, run production, or invoke another model.
 You may execute only these exact commands: {json.dumps(stage.get('allowedCommands', []))}
-Dependency artifact hashes: {json.dumps(inputs, sort_keys=True)}
-Combined input artifact SHA-256: {input_hash}
+Inspectable handoff folder: {handoff_path}
+Canonical handoff SHA-256: {handoff_hash}
+Read every handoff file before work. Explicitly copy this digest into `handoffSha256` and set
+`workStarted=true` only after the handoff was read and work actually started.
+Routed review findings: {json.dumps(feedback or [], sort_keys=True)}
 
 {stage.get('prompt', '')}
 
-Return only the structured response required by the supplied schema. Copy the combined input hash
-exactly into `inputArtifactSha256`. A pass requires zero findings and requiresHuman=false.
+Return only the structured response required by the supplied schema. A pass requires zero findings
+and requiresHuman=false. A review may return fail with actionable findings for automatic repair.
 """
 
 
@@ -250,39 +334,130 @@ def run_dag(*, root: Path, manifest_path: Path, live: bool, live_confirmed: bool
                         log.append("human_gate_waiting", stageId=stage_id, gate=stage.get("gate", "custom"), inputArtifactSha256=input_hash)
                         break
                 if stage["type"] in AGENT_STAGE_TYPES:
-                    baseline_paths = _changed_paths(snapshot)
-                    accepted_result = None
-                    for attempt in range(1, stage["maxAttempts"] + 1):
-                        prefix = run_dir / "stages" / stage_id / f"attempt-{attempt:02d}"
-                        prompt = _stage_prompt(stage, inputs, input_hash, stage["type"] in {"implementation", "repair"})
-                        command = _build_stage_command(stage, snapshot, prompt, root / "schemas" / "generic-stage-result.schema.json")
+                    def invoke_agent(
+                        active_stage: dict[str, Any], workspace: Path, handoff_path: Path,
+                        handoff_hash: str, prefix: Path, feedback: list[dict[str, Any]] | None = None,
+                    ) -> dict[str, Any]:
+                        baseline_paths = _changed_paths(workspace)
+                        prompt = _stage_prompt(
+                            active_stage, handoff_hash, workspace / ".conductor" / "handoff",
+                            active_stage["type"] in {"implementation", "repair"}, feedback,
+                        )
+                        command = _build_stage_command(active_stage, workspace, prompt, root / "schemas" / "generic-stage-result.schema.json")
                         write_once(prefix.with_suffix(".prompt.txt"), prompt.encode() + b"\n")
                         write_once(prefix.with_suffix(".command.json"), json.dumps(redact_command(command), indent=2, sort_keys=True).encode() + b"\n")
-                        log.append("stage_attempt_started", stageId=stage_id, attempt=attempt, provider=stage["provider"], inputArtifactSha256=input_hash)
-                        completed = run_command(command.argv, cwd=snapshot, timeout_seconds=stage["timeoutSeconds"], check=False)
+                        operation_id = active_stage["id"]
+                        log.append("provider_work_started", stageId=stage_id, operationId=operation_id, provider=active_stage["provider"], handoffSha256=handoff_hash, workspace=str(workspace))
+                        completed = run_command(command.argv, cwd=workspace, timeout_seconds=active_stage["timeoutSeconds"], check=False)
                         write_once(prefix.with_suffix(".stdout"), completed.stdout)
                         write_once(prefix.with_suffix(".stderr"), completed.stderr)
+                        if completed.returncode != 0:
+                            raise ConductorError(f"provider exited with code {completed.returncode}")
+                        result = parse_structured_response(completed.stdout, validate_stage_result)
+                        if result["handoffSha256"] != handoff_hash:
+                            raise ConductorError("provider acknowledged the wrong handoff digest")
+                        changed = _changed_paths(workspace)
+                        if active_stage["type"] in {"reconnaissance", "review"} and changed != baseline_paths:
+                            raise ConductorError("read-only generic stage mutated its isolated workspace")
+                        if active_stage["type"] in {"implementation", "repair"} and not all(
+                            path in baseline_paths or any(fnmatch.fnmatchcase(path, pattern) for pattern in active_stage.get("allowedPaths", []))
+                            for path in changed
+                        ):
+                            raise ConductorError("generic stage changed a path outside allowedPaths")
+                        if active_stage["type"] in {"implementation", "repair"} and changed == baseline_paths:
+                            raise ConductorError("controlled-write generic stage produced no changed artifact")
+                        write_once(prefix.with_suffix(".normalized.json"), json.dumps(result, indent=2, sort_keys=True).encode() + b"\n")
+                        log.append("provider_handoff_acknowledged", stageId=stage_id, operationId=operation_id, provider=active_stage["provider"], handoffSha256=handoff_hash)
+                        log.append("provider_completed", stageId=stage_id, operationId=operation_id, provider=active_stage["provider"], status=result["status"], findingCount=len(result["findings"]))
+                        return result
+
+                    workspace = run_dir / "workspaces" / stage_id / "initial"
+                    _create_workspace(snapshot, workspace)
+                    handoff_path, handoff_hash, _ = _build_handoff(
+                        run_dir=run_dir, workspace=workspace, stage=stage, accepted=accepted,
+                        instructions=stage["prompt"],
+                    )
+                    accepted_result = None
+                    result = None
+                    last_attempt_error = None
+                    for attempt in range(1, stage["maxAttempts"] + 1):
+                        prefix = run_dir / "stages" / stage_id / f"attempt-{attempt:02d}"
+                        log.append("stage_attempt_started", stageId=stage_id, attempt=attempt, provider=stage["provider"], handoffSha256=handoff_hash)
                         try:
-                            result = parse_structured_response(completed.stdout, validate_stage_result) if completed.returncode == 0 else None
-                            if result is None or result["inputArtifactSha256"] != input_hash:
-                                raise ConductorError("generic stage response input artifact mismatch")
-                            changed = _changed_paths(snapshot)
-                            if stage["type"] in {"reconnaissance", "review"} and changed != baseline_paths:
-                                raise ConductorError("read-only generic stage mutated the snapshot")
-                            if stage["type"] in {"implementation", "repair"} and not _paths_allowed(changed, stage["allowedPaths"]):
-                                raise ConductorError("generic stage changed a path outside allowedPaths")
-                            if result["status"] != "pass":
-                                raise ConductorError("generic stage did not pass")
-                            write_once(prefix.with_suffix(".normalized.json"), json.dumps(result, indent=2, sort_keys=True).encode() + b"\n")
+                            result = invoke_agent(stage, workspace, handoff_path, handoff_hash, prefix)
                             accepted_result = result
                             break
                         except ConductorError as exc:
+                            last_attempt_error = str(exc)
                             log.append("stage_attempt_failed", stageId=stage_id, attempt=attempt, error=str(exc))
-                            if "outside allowedPaths" in str(exc) or "mutated the snapshot" in str(exc):
+                            if "outside allowedPaths" in str(exc) or "mutated its isolated workspace" in str(exc) or "wrong handoff" in str(exc):
                                 raise
                     if accepted_result is None:
-                        raise ConductorError(f"generic stage {stage_id} exhausted its bounded attempts")
-                    payload = json.dumps(accepted_result, sort_keys=True).encode() + json.dumps(_changed_paths(snapshot)).encode()
+                        raise ConductorError(f"generic stage {stage_id} exhausted its bounded attempts: {last_attempt_error}")
+
+                    artifact_files: list[str] = []
+                    normalized_path = run_dir / "stages" / stage_id / f"attempt-{attempt:02d}.normalized.json"
+                    artifact_files.append(str(normalized_path.relative_to(run_dir)))
+                    repair_policy = stage.get("repairPolicy")
+                    round_number = 0
+                    while stage["type"] == "review" and accepted_result["status"] == "fail" and repair_policy:
+                        round_number += 1
+                        if round_number > repair_policy["maxRounds"]:
+                            raise ConductorError(f"review stage {stage_id} exhausted its bounded repair rounds")
+                        findings = accepted_result["findings"]
+                        log.append("review_findings_routed", stageId=stage_id, round=round_number, responsibleProvider=repair_policy["provider"], findings=findings)
+                        repair_stage = {
+                            "id": stage_id + "-repair", "type": "reconnaissance" if repair_policy.get("readOnly", False) else "repair",
+                            "provider": repair_policy["provider"], "dependsOn": stage["dependsOn"],
+                            "prompt": repair_policy["prompt"], "allowedPaths": repair_policy.get("allowedPaths", []),
+                            "allowedCommands": repair_policy.get("allowedCommands", []),
+                            "timeoutSeconds": repair_policy.get("timeoutSeconds", stage["timeoutSeconds"]), "maxAttempts": 1,
+                        }
+                        repair_workspace = run_dir / "workspaces" / stage_id / f"repair-{round_number:02d}"
+                        _create_workspace(snapshot, repair_workspace)
+                        repair_instructions = repair_policy["prompt"] + "\n\nActionable review findings:\n" + json.dumps(findings, indent=2)
+                        repair_handoff, repair_hash, _ = _build_handoff(
+                            run_dir=run_dir, workspace=repair_workspace, stage=repair_stage,
+                            accepted=accepted, instructions=repair_instructions, suffix=f"-repair-{round_number:02d}",
+                        )
+                        repair_prefix = run_dir / "stages" / stage_id / f"repair-{round_number:02d}"
+                        repair_result = invoke_agent(repair_stage, repair_workspace, repair_handoff, repair_hash, repair_prefix, findings)
+                        if repair_result["status"] != "pass":
+                            raise ConductorError(f"repair for {stage_id} round {round_number} did not pass")
+                        repair_changed = _changed_paths(repair_workspace)
+                        repair_diff = git(repair_workspace, "diff", "--binary", "HEAD")
+                        repair_diff_path = run_dir / "stages" / stage_id / f"repair-{round_number:02d}.diff.patch"
+                        repair_manifest_path = run_dir / "stages" / stage_id / f"repair-{round_number:02d}.changed-files.json"
+                        write_once(repair_diff_path, repair_diff)
+                        write_once(repair_manifest_path, json.dumps(repair_changed, indent=2).encode() + b"\n")
+                        artifact_files.extend([str(repair_prefix.with_suffix(".normalized.json").relative_to(run_dir)), str(repair_diff_path.relative_to(run_dir)), str(repair_manifest_path.relative_to(run_dir))])
+                        synthetic_id = f"{stage_id}-repair-{round_number:02d}"
+                        synthetic_record = {"stageId": synthetic_id, "artifactSha256": sha256_bytes(repair_diff + json.dumps(repair_result, sort_keys=True).encode()), "artifactFiles": artifact_files[-3:]}
+                        rereview_accepted = dict(accepted)
+                        rereview_accepted[synthetic_id] = synthetic_record
+                        rereview_stage = dict(stage)
+                        rereview_stage["dependsOn"] = stage["dependsOn"] + [synthetic_id]
+                        review_workspace = run_dir / "workspaces" / stage_id / f"review-{round_number + 1:02d}"
+                        _create_workspace(snapshot, review_workspace)
+                        review_handoff, review_hash, _ = _build_handoff(
+                            run_dir=run_dir, workspace=review_workspace, stage=rereview_stage,
+                            accepted=rereview_accepted, instructions=stage["prompt"], suffix=f"-review-{round_number + 1:02d}",
+                        )
+                        review_prefix = run_dir / "stages" / stage_id / f"review-{round_number + 1:02d}"
+                        accepted_result = invoke_agent(stage, review_workspace, review_handoff, review_hash, review_prefix)
+                        artifact_files.append(str(review_prefix.with_suffix(".normalized.json").relative_to(run_dir)))
+                    if accepted_result["status"] != "pass":
+                        raise ConductorError(f"generic stage {stage_id} did not reach pass")
+                    active_workspace = workspace
+                    changed = _changed_paths(active_workspace)
+                    diff = git(active_workspace, "diff", "--binary", "HEAD")
+                    changed_path = run_dir / "stages" / stage_id / "changed-files.json"
+                    diff_path = run_dir / "stages" / stage_id / "diff.patch"
+                    write_once(changed_path, json.dumps(changed, indent=2).encode() + b"\n")
+                    write_once(diff_path, diff)
+                    artifact_files.extend([str(changed_path.relative_to(run_dir)), str(diff_path.relative_to(run_dir))])
+                    payload = json.dumps(accepted_result, sort_keys=True).encode()
+                    payload += b"".join((run_dir / relative).read_bytes() for relative in artifact_files)
                 elif stage["type"] == "test":
                     completed = run_command(stage["command"], cwd=snapshot, timeout_seconds=stage["timeoutSeconds"], check=False)
                     write_once(run_dir / "stages" / stage_id / "stdout", completed.stdout)
@@ -299,7 +474,7 @@ def run_dag(*, root: Path, manifest_path: Path, live: bool, live_confirmed: bool
                     payload = git(snapshot, "rev-parse", "HEAD")
                 else:
                     payload = json.dumps({"approved": True, "stageId": stage_id}).encode()
-                record = {"stageId": stage_id, "type": stage["type"], "provider": stage.get("provider"), "inputArtifactSha256": input_hash, "artifactSha256": sha256_bytes(payload), "accepted": True}
+                record = {"stageId": stage_id, "type": stage["type"], "provider": stage.get("provider"), "inputArtifactSha256": input_hash, "artifactSha256": sha256_bytes(payload), "artifactFiles": artifact_files if stage["type"] in AGENT_STAGE_TYPES else [], "accepted": True}
                 accepted_bytes = json.dumps(record, indent=2, sort_keys=True).encode() + b"\n"
                 write_once(run_dir / "stages" / stage_id / "accepted.json", accepted_bytes)
                 accepted[stage_id] = record

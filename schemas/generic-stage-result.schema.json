@@ -3,10 +3,11 @@
   "title": "Foundry Conductor Generic Stage Result",
   "type": "object",
   "additionalProperties": false,
-  "required": ["status", "inputArtifactSha256", "summary", "findings", "requiresHuman"],
+  "required": ["status", "handoffSha256", "workStarted", "summary", "findings", "requiresHuman"],
   "properties": {
     "status": {"type": "string", "enum": ["pass", "fail", "blocked"]},
-    "inputArtifactSha256": {"type": "string", "pattern": "^[0-9a-f]{64}$"},
+    "handoffSha256": {"type": "string", "pattern": "^[0-9a-f]{64}$"},
+    "workStarted": {"type": "boolean"},
     "summary": {"type": "string", "minLength": 1},
     "findings": {
       "type": "array",
