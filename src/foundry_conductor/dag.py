@@ -321,6 +321,25 @@ def run_dag(*, root: Path, manifest_path: Path, live: bool, live_confirmed: bool
                     record = load_json(prior)
                     if record.get("stageId") != stage_id:
                         raise ConductorError(f"resume artifact targets wrong stage: {stage_id}")
+                    imported_artifacts: list[bytes] = []
+                    artifact_hashes = record.get("artifactFileSha256", {})
+                    for relative in record.get("artifactFiles", []):
+                        source_artifact = resume_dir / relative
+                        if not source_artifact.is_file():
+                            raise ConductorError(f"resume accepted artifact file is missing: {relative}")
+                        data = source_artifact.read_bytes()
+                        if artifact_hashes and artifact_hashes.get(relative) != sha256_bytes(data):
+                            raise ConductorError(f"resume accepted artifact file hash mismatch: {relative}")
+                        write_once(run_dir / relative, data)
+                        imported_artifacts.append(data)
+                    if record.get("type") in AGENT_STAGE_TYPES and not artifact_hashes:
+                        normalized = [relative for relative in record.get("artifactFiles", []) if relative.endswith(".normalized.json")]
+                        if not normalized:
+                            raise ConductorError(f"resume agent artifact has no normalized response: {stage_id}")
+                        result = load_json(run_dir / normalized[-1])
+                        recomputed = sha256_bytes(json.dumps(result, sort_keys=True).encode() + b"".join(imported_artifacts))
+                        if recomputed != record.get("artifactSha256"):
+                            raise ConductorError(f"resume accepted artifact content mismatch: {stage_id}")
                     accepted[stage_id] = record
                     accepted_record_hashes[stage_id] = expected_record_hash
                     write_once(run_dir / "stages" / stage_id / "accepted-import.json", json.dumps(record, indent=2, sort_keys=True).encode() + b"\n")
@@ -482,6 +501,9 @@ def run_dag(*, root: Path, manifest_path: Path, live: bool, live_confirmed: bool
                 else:
                     payload = json.dumps({"approved": True, "stageId": stage_id}).encode()
                 record = {"stageId": stage_id, "type": stage["type"], "provider": stage.get("provider"), "inputArtifactSha256": input_hash, "artifactSha256": sha256_bytes(payload), "artifactFiles": artifact_files if stage["type"] in AGENT_STAGE_TYPES else [], "accepted": True}
+                record["artifactFileSha256"] = {
+                    relative: sha256_bytes((run_dir / relative).read_bytes()) for relative in record["artifactFiles"]
+                }
                 accepted_bytes = json.dumps(record, indent=2, sort_keys=True).encode() + b"\n"
                 write_once(run_dir / "stages" / stage_id / "accepted.json", accepted_bytes)
                 accepted[stage_id] = record

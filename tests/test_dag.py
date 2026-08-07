@@ -103,6 +103,32 @@ class DagTests(unittest.TestCase):
             build_again.assert_not_called()
             self.assertEqual("complete", second["status"])
 
+    def test_partial_resume_imports_readable_artifacts_without_reinvoking_completed_providers(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary); repo = self.repo(root)
+            path = root / "manifest.json"; path.write_text(json.dumps(self.manifest(repo)))
+            calls = {"backend-read": 0, "contract-read": 0, "security-review": 0}
+            allow_review = False
+            def build(stage, snapshot, prompt, schema): return AgentCommand(stage["provider"], "fake", ["fake", stage["id"], prompt])
+            def execute(argv, **kwargs):
+                if argv[0] == "git": return real_run_command(argv, **kwargs)
+                stage_id, prompt = argv[1], argv[2]; calls[stage_id] += 1
+                digest = re.search(r"Canonical handoff SHA-256: ([0-9a-f]{64})", prompt).group(1)
+                if stage_id == "security-review" and not allow_review:
+                    return subprocess.CompletedProcess(argv, 0, b"invalid", b"")
+                value = {"status": "pass", "handoffSha256": digest, "workStarted": True, "summary": stage_id, "findings": [], "requiresHuman": False}
+                return subprocess.CompletedProcess(argv, 0, json.dumps(value).encode(), b"")
+            with patch("foundry_conductor.dag._build_stage_command", side_effect=build), patch("foundry_conductor.dag.run_command", side_effect=execute):
+                first = run_dag(root=root, manifest_path=path, live=True, live_confirmed=True)
+                self.assertEqual("failed", first["status"])
+                allow_review = True
+                second = run_dag(root=root, manifest_path=path, live=True, live_confirmed=True, resume_run_id=first["runId"])
+            self.assertEqual("complete", second["status"])
+            self.assertEqual(1, calls["backend-read"]); self.assertEqual(1, calls["contract-read"])
+            self.assertEqual(2, calls["security-review"])
+            imported = Path(second["runDirectory"]) / "stages" / "backend-read" / "attempt-01.normalized.json"
+            self.assertTrue(imported.is_file()); self.assertEqual("backend-read", json.loads(imported.read_text())["summary"])
+
     def test_write_path_violation_fails_closed(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:
             root = Path(temporary); repo = self.repo(root)
