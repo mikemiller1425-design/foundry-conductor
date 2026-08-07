@@ -62,6 +62,9 @@ class DagTests(unittest.TestCase):
             value["stages"] = [{"id": "nas", "type": "human_gate", "gate": "nasAccess", "dependsOn": [], "timeoutSeconds": 10, "maxAttempts": 1}]
             with self.assertRaisesRegex(ConductorError, "unauthorized permission nasAccess"):
                 validate_manifest(value)
+            value = self.manifest(Path(temporary) / "source"); value["stages"][0]["maxTurns"] = 51
+            with self.assertRaisesRegex(ConductorError, "maxTurns is invalid"):
+                validate_manifest(value)
 
     def test_plan_invokes_no_provider(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:

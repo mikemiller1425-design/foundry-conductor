@@ -100,6 +100,8 @@ def validate_manifest(value: Any) -> dict[str, Any]:
             stage["provider"] = provider
             if not isinstance(stage.get("prompt"), str) or not stage["prompt"]:
                 raise ConductorError(f"generic stage {stage['id']} prompt is required")
+            if not isinstance(stage.get("maxTurns", 5), int) or not 1 <= stage.get("maxTurns", 5) <= 50:
+                raise ConductorError(f"generic stage {stage['id']} maxTurns is invalid")
             context_paths = stage.get("contextPaths", [])
             if not isinstance(context_paths, list) or not all(
                 isinstance(item, str) and item and not item.startswith("/") and ".." not in Path(item).parts
@@ -116,6 +118,8 @@ def validate_manifest(value: Any) -> dict[str, Any]:
             policy["provider"] = provider
             if not isinstance(policy.get("prompt"), str) or not policy["prompt"]:
                 raise ConductorError(f"review stage {stage['id']} repair prompt is required")
+            if not isinstance(policy.get("maxTurns", 5), int) or not 1 <= policy.get("maxTurns", 5) <= 50:
+                raise ConductorError(f"review stage {stage['id']} repair maxTurns is invalid")
             if not policy.get("readOnly", False) and (not isinstance(policy.get("allowedPaths"), list) or not policy["allowedPaths"]):
                 raise ConductorError(f"review stage {stage['id']} repair requires allowedPaths")
         if stage["type"] in WRITE_STAGE_TYPES:
@@ -412,6 +416,7 @@ def run_dag(*, root: Path, manifest_path: Path, live: bool, live_confirmed: bool
                             "prompt": repair_policy["prompt"], "allowedPaths": repair_policy.get("allowedPaths", []),
                             "allowedCommands": repair_policy.get("allowedCommands", []),
                             "timeoutSeconds": repair_policy.get("timeoutSeconds", stage["timeoutSeconds"]), "maxAttempts": 1,
+                            "maxTurns": repair_policy.get("maxTurns", 5),
                         }
                         repair_workspace = run_dir / "workspaces" / stage_id / f"repair-{round_number:02d}"
                         _create_workspace(snapshot, repair_workspace)

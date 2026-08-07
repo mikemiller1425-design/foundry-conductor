@@ -12,21 +12,21 @@
       "contextPaths": ["apps/api/src/nas/*.ts", "packages/contracts/src/nasCatalog.ts", "docs/03-architecture/nas-readonly-boundary-threat-model.md"],
       "allowedPaths": ["apps/api/src/nas/*.ts", "packages/contracts/src/nasCatalog.ts"],
       "prompt": "Implement only the already-authorized Package 2a backend contract and scanner truth in the disposable workspace, using controlled fixtures only. Never access NAS or /Volumes.",
-      "timeoutSeconds": 900, "maxAttempts": 2
+      "timeoutSeconds": 900, "maxAttempts": 2, "maxTurns": 30
     },
     {
       "id": "cursor-package-2c-preparation", "type": "reconnaissance", "role": "frontend", "dependsOn": ["claude-package-2a-backend"],
       "contextPaths": ["packages/contracts/src/nasCatalog.ts", "packages/ui/package.json", "apps/agent-city/src/app/page.tsx"],
       "prompt": "Perform read-only Package 2c frontend architecture, logic, shared-contract dependency, and fixture-plan reconnaissance. Do not integrate or claim Package 2c acceptance before Package 2a and 2b acceptance.",
-      "timeoutSeconds": 600, "maxAttempts": 2
+      "timeoutSeconds": 600, "maxAttempts": 2, "maxTurns": 20
     },
     {
       "id": "codex-integration-review", "type": "review", "role": "integration", "dependsOn": ["claude-package-2a-backend", "cursor-package-2c-preparation"],
       "contextPaths": ["apps/api/src/nas/*.ts", "packages/contracts/src/nasCatalog.ts", "docs/03-architecture/nas-readonly-boundary-threat-model.md"],
       "prompt": "Review the complete backend diff and frontend preparation artifact for governance, security, contract truth, dependency ordering, and scope. Return actionable findings to the responsible backend provider; pass only with zero findings.",
-      "timeoutSeconds": 600, "maxAttempts": 2,
+      "timeoutSeconds": 600, "maxAttempts": 2, "maxTurns": 25,
       "repairPolicy": {
-        "role": "backend", "maxRounds": 2, "timeoutSeconds": 900,
+        "role": "backend", "maxRounds": 2, "timeoutSeconds": 900, "maxTurns": 30,
         "allowedPaths": ["apps/api/src/nas/*.ts", "packages/contracts/src/nasCatalog.ts"],
         "prompt": "Repair only the routed Codex findings in the disposable workspace and within the exact allowed paths. No NAS, external action, or scope expansion."
       }
