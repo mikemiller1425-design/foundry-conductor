@@ -238,3 +238,4 @@ verdict is written once under the run directory. A successful run writes the
 candidate to `final/package-2a-authorization-prompt.md` and stops for the
 operator. It does not execute the candidate prompt.
 test
+test
