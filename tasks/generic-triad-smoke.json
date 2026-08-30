@@ -3,8 +3,8 @@
   "workflow": "generic_dag",
   "id": "generic-triad-smoke",
   "sourceRepository": "/Users/macmini/Documents/GitHub/Foundry",
-  "expectedBranch": "main",
-  "expectedHead": "c1607ad3068504438281f3e667d7fef4c9cc2db2",
+  "expectedBranch": "creator-foundation-seal",
+  "expectedHead": "0c3cb233ff6b0d2da669500d672525e70555d148",
   "permissions": {
     "push": false,
     "nasAccess": false,
@@ -19,7 +19,7 @@
       "type": "reconnaissance",
       "role": "general",
       "dependsOn": [],
-      "prompt": "Identify the repository name from tracked files. Make no changes and return a pass with no findings.",
+      "prompt": "Read-only. Do not modify files. Identify the repository name from tracked files. Print only one JSON object and nothing else. Required keys: status, handoffSha256, workStarted, summary, findings, requiresHuman. Use the exact handoffSha256 from the handoff. status must be pass. findings must be []. requiresHuman must be false. workStarted must be true.",
       "timeoutSeconds": 300,
       "maxAttempts": 1
     },
@@ -28,7 +28,7 @@
       "type": "reconnaissance",
       "role": "contract",
       "dependsOn": ["claude-recon"],
-      "prompt": "Confirm that the dependency artifact was supplied and identify one tracked contract directory. Make no changes.",
+      "prompt": "Read-only. Do not modify files. Confirm the Claude dependency packet is present. Identify one tracked contract directory. Do not write a plan. Do not write prose. Print only one JSON object and nothing else. Required keys: status, handoffSha256, workStarted, summary, findings, requiresHuman. Copy handoffSha256 exactly from the handoff. status must be pass. findings must be []. requiresHuman must be false. workStarted must be true. summary must name the contract directory you found.",
       "timeoutSeconds": 300,
       "maxAttempts": 1
     },
@@ -37,7 +37,7 @@
       "type": "review",
       "role": "governance",
       "dependsOn": ["claude-recon", "cursor-contract-read"],
-      "prompt": "Confirm the run is read-only, dependency hashes are present, and no implementation or external action is authorized.",
+      "prompt": "Read-only review. Do not modify files. Confirm the run is read-only and that no implementation, push, NAS, spend, or external action is authorized. Print only one JSON object and nothing else. Required keys: status, handoffSha256, workStarted, summary, findings, requiresHuman. Copy handoffSha256 exactly from the handoff. status must be pass if those holds. findings must be []. requiresHuman must be false. workStarted must be true.",
       "timeoutSeconds": 300,
       "maxAttempts": 1
     }
