@@ -1,0 +1,297 @@
+#!/usr/bin/env python3
+"""SPEC.md to one generic_dag task, then doctor, then plan. No live models, no push."""
+from __future__ import annotations
+
+import argparse
+import json
+import os
+import re
+import shutil
+import subprocess
+import sys
+import tempfile
+from pathlib import Path
+from typing import Any
+
+FORBIDDEN_FLAGS = {"--live", "--confirm-live-models", "--push", "--commit", "--merge"}
+ID_PATTERN = re.compile(r"[a-z0-9][a-z0-9-]{1,63}")
+PERMISSION_KEYS = ("push", "nasAccess", "externalActions", "spending", "destructive", "productionExecution")
+AGENT_STAGE_TYPES = {"reconnaissance", "implementation", "review", "repair"}
+STAGE_TYPES = AGENT_STAGE_TYPES | {"workspace_seed", "test", "commit", "human_gate"}
+WRITE_STAGE_TYPES = {"implementation", "repair"}
+CURSOR_ROLES = {"frontend", "contract", "contract_dependency"}
+
+PROMPT = """You are producing one Foundry Conductor task manifest.
+
+Read ./SPEC.md in your current working directory. It is a disposable copy of the Foundry
+specification. Do not read, write, or search any other directory or repository.
+
+Print exactly one JSON object and nothing else. No prose, no explanation, no markdown code
+fence, no leading or trailing commentary.
+
+The object is a generic_dag manifest with exactly these top-level values:
+  schemaVersion: 1
+  workflow: "generic_dag"
+  id: kebab-case, matching [a-z0-9][a-z0-9-]{1,63}, naming the work described in SPEC.md
+  sourceRepository: "__SOURCE__"
+  expectedBranch: "__BRANCH__"
+  expectedHead: "__HEAD__"
+  permissions: every one of push, nasAccess, externalActions, spending, destructive, and
+    productionExecution set to false
+  stages: a non-empty array derived from SPEC.md
+
+Every stage requires id (kebab-case and unique), type, dependsOn (array of earlier stage ids),
+timeoutSeconds (integer 1-3600), and maxAttempts (integer 1-5).
+Allowed types: reconnaissance, implementation, review, repair, workspace_seed, test, commit,
+human_gate.
+reconnaissance, implementation, review, and repair stages also require role and a non-empty
+prompt. implementation and repair stages also require allowedPaths, a non-empty array of exact
+repository-relative paths. The cursor roles frontend, contract, and contract_dependency are
+read-only and must never be used for an implementation or repair stage.
+test stages require command and allowedCommands arrays, and command must appear verbatim in
+allowedCommands.
+
+Every stage prompt must require the agent to print only one JSON object with the keys status,
+handoffSha256, workStarted, summary, findings, and requiresHuman, to copy handoffSha256 exactly
+from the handoff, and to set workStarted true.
+
+Derive the stages from SPEC.md alone. Do not invent push, merge, deployment, spending, mounted
+volume, or production stages."""
+
+
+class AdvanceError(RuntimeError):
+    pass
+
+
+def note(message: str) -> None:
+    print(f"foundry-advance: {message}")
+
+
+def run_capture(command: list[str], *, cwd: Path, timeout: int) -> subprocess.CompletedProcess[str]:
+    try:
+        return subprocess.run(command, cwd=str(cwd), capture_output=True, text=True, timeout=timeout, check=False)
+    except FileNotFoundError as exc:
+        raise AdvanceError(f"command not found: {command[0]}") from exc
+    except subprocess.TimeoutExpired as exc:
+        raise AdvanceError(f"command timed out after {timeout}s: {command[0]}") from exc
+
+
+def git_value(foundry: Path, *args: str) -> str:
+    result = run_capture(["git", "-C", str(foundry), *args], cwd=foundry, timeout=60)
+    if result.returncode != 0:
+        raise AdvanceError(f"git {' '.join(args)} failed in {foundry}: {result.stderr.strip()}")
+    return result.stdout.strip()
+
+
+def resolve_foundry(root: Path, override: str | None) -> Path:
+    candidate = override or os.environ.get("FOUNDRY_ROOT") or str(root.parent / "Foundry")
+    foundry = Path(candidate).expanduser().resolve()
+    if not (foundry / "SPEC.md").is_file():
+        raise AdvanceError(f"Foundry SPEC.md not found at {foundry / 'SPEC.md'}; pass --foundry PATH")
+    if foundry == root:
+        raise AdvanceError("the Foundry checkout must not be the conductor repository")
+    return foundry
+
+
+def conductor_command(root: Path, *args: str) -> list[str]:
+    foundryctl = root / "foundryctl"
+    if not foundryctl.is_file():
+        raise AdvanceError(f"foundryctl not found at {foundryctl}")
+    if os.access(foundryctl, os.X_OK):
+        return [str(foundryctl), *args]
+    return ["/bin/sh", str(foundryctl), *args]
+
+
+def parse_only_object(text: str) -> dict[str, Any]:
+    body = text.strip()
+    if body.startswith("```"):
+        raise AdvanceError("model returned a code fence instead of one bare JSON object")
+    if not body.startswith("{") or not body.endswith("}"):
+        raise AdvanceError("model returned prose or extra output instead of one bare JSON object")
+    try:
+        value = json.loads(body)
+    except json.JSONDecodeError as exc:
+        raise AdvanceError(f"model output is not valid JSON: {exc}") from exc
+    if not isinstance(value, dict):
+        raise AdvanceError("model output is not a JSON object")
+    return value
+
+
+def validate_manifest(value: dict[str, Any], *, source: str, branch: str, head: str) -> str:
+    required = {"schemaVersion", "workflow", "id", "sourceRepository", "expectedBranch", "expectedHead", "permissions", "stages"}
+    missing = sorted(required - set(value))
+    if missing:
+        raise AdvanceError(f"manifest is missing required fields: {', '.join(missing)}")
+    if value["schemaVersion"] != 1 or value["workflow"] != "generic_dag":
+        raise AdvanceError("manifest is not a generic_dag schemaVersion 1 task")
+    task_id = value["id"]
+    if not isinstance(task_id, str) or not ID_PATTERN.fullmatch(task_id):
+        raise AdvanceError("manifest id is not a valid kebab-case identifier")
+    for field, expected in (("sourceRepository", source), ("expectedBranch", branch), ("expectedHead", head)):
+        if value[field] != expected:
+            raise AdvanceError(f"manifest {field} is {value[field]!r}; the observed Foundry baseline is {expected!r}")
+    permissions = value["permissions"]
+    if not isinstance(permissions, dict):
+        raise AdvanceError("manifest permissions must be an object")
+    for key in PERMISSION_KEYS:
+        if permissions.get(key, False) is not False:
+            raise AdvanceError(f"manifest permissions.{key} must be false")
+    stages = value["stages"]
+    if not isinstance(stages, list) or not stages:
+        raise AdvanceError("manifest stages must be a non-empty array")
+    if not all(isinstance(stage, dict) for stage in stages):
+        raise AdvanceError("every stage must be an object")
+    declared = [stage.get("id") for stage in stages]
+    seen: set[str] = set()
+    for stage in stages:
+        for field in ("id", "type", "dependsOn", "timeoutSeconds", "maxAttempts"):
+            if field not in stage:
+                raise AdvanceError(f"stage {stage.get('id', '?')!r} is missing {field}")
+        stage_id = stage["id"]
+        if not isinstance(stage_id, str) or not ID_PATTERN.fullmatch(stage_id):
+            raise AdvanceError(f"stage id {stage_id!r} is invalid")
+        if stage_id in seen:
+            raise AdvanceError(f"stage id {stage_id!r} is duplicated")
+        seen.add(stage_id)
+        if stage["type"] not in STAGE_TYPES:
+            raise AdvanceError(f"stage {stage_id} type {stage['type']!r} is invalid")
+        depends_on = stage["dependsOn"]
+        if not isinstance(depends_on, list) or not all(isinstance(item, str) for item in depends_on):
+            raise AdvanceError(f"stage {stage_id} dependsOn is invalid")
+        for dependency in depends_on:
+            if dependency == stage_id or dependency not in declared:
+                raise AdvanceError(f"stage {stage_id} depends on {dependency!r}, which is not another declared stage")
+        if not isinstance(stage["timeoutSeconds"], int) or isinstance(stage["timeoutSeconds"], bool) or not 1 <= stage["timeoutSeconds"] <= 3600:
+            raise AdvanceError(f"stage {stage_id} timeoutSeconds is invalid")
+        if not isinstance(stage["maxAttempts"], int) or isinstance(stage["maxAttempts"], bool) or not 1 <= stage["maxAttempts"] <= 5:
+            raise AdvanceError(f"stage {stage_id} maxAttempts is invalid")
+        if stage["type"] in AGENT_STAGE_TYPES:
+            if not isinstance(stage.get("role"), str) or not stage["role"]:
+                raise AdvanceError(f"stage {stage_id} requires a role")
+            if not isinstance(stage.get("prompt"), str) or not stage["prompt"]:
+                raise AdvanceError(f"stage {stage_id} requires a prompt")
+        if stage["type"] in WRITE_STAGE_TYPES:
+            allowed_paths = stage.get("allowedPaths")
+            if not isinstance(allowed_paths, list) or not allowed_paths or not all(
+                isinstance(item, str) and item and not item.startswith("/") and ".." not in Path(item).parts
+                for item in allowed_paths
+            ):
+                raise AdvanceError(f"write stage {stage_id} requires exact relative allowedPaths")
+            if stage.get("role") in CURSOR_ROLES or stage.get("provider") == "cursor":
+                raise AdvanceError(f"stage {stage_id} routes a write stage to a read-only cursor role")
+        if stage["type"] == "test":
+            command = stage.get("command")
+            allowed = stage.get("allowedCommands", [])
+            if not isinstance(command, list) or not command or not all(isinstance(item, str) and item for item in command):
+                raise AdvanceError(f"test stage {stage_id} command is invalid")
+            if not isinstance(allowed, list) or command not in allowed:
+                raise AdvanceError(f"test stage {stage_id} command is not explicitly allowed")
+    return task_id
+
+
+def emit_task(root: Path, *, foundry: Path, replace: bool, timeout: int) -> str:
+    spec = foundry / "SPEC.md"
+    if not spec.read_text(encoding="utf-8").strip():
+        raise AdvanceError(f"{spec} is empty")
+    branch = git_value(foundry, "rev-parse", "--abbrev-ref", "HEAD")
+    head = git_value(foundry, "rev-parse", "HEAD")
+    note(f"SPEC {spec}")
+    note(f"baseline {branch} {head}")
+
+    claude = os.environ.get("CLAUDE_BIN", "claude")
+    if shutil.which(claude) is None and not Path(claude).is_file():
+        raise AdvanceError(f"Claude CLI not found: {claude}")
+
+    prompt = PROMPT.replace("__SOURCE__", str(foundry)).replace("__BRANCH__", branch).replace("__HEAD__", head)
+    scratch = Path(tempfile.mkdtemp(prefix="foundry-advance-"))
+    try:
+        shutil.copyfile(spec, scratch / "SPEC.md")
+        note(f"disposable spec copy {scratch / 'SPEC.md'}")
+        result = run_capture([claude, "-p", prompt, "--output-format", "text"], cwd=scratch, timeout=timeout)
+    finally:
+        shutil.rmtree(scratch, ignore_errors=True)
+    if result.returncode != 0:
+        raise AdvanceError(f"Claude CLI exited {result.returncode}: {result.stderr.strip() or result.stdout.strip()}")
+
+    manifest = parse_only_object(result.stdout)
+    task_id = validate_manifest(manifest, source=str(foundry), branch=branch, head=head)
+    target = root / "tasks" / f"{task_id}.json"
+    if target.exists() and not replace:
+        raise AdvanceError(f"{target} already exists; rerun with --replace to overwrite it")
+
+    target.parent.mkdir(parents=True, exist_ok=True)
+    staged = target.with_name(f".{target.name}.partial")
+    staged.write_text(json.dumps(manifest, indent=2, sort_keys=False) + "\n", encoding="utf-8")
+    os.replace(staged, target)
+    note(f"wrote {target}")
+    return task_id
+
+
+def check_and_plan(root: Path, task_id: str, timeout: int) -> Path:
+    doctor = run_capture(conductor_command(root, "doctor", task_id), cwd=root, timeout=timeout)
+    sys.stdout.write(doctor.stdout)
+    sys.stderr.write(doctor.stderr)
+    if doctor.returncode != 0:
+        raise AdvanceError(f"doctor is not ok for {task_id}; not planning")
+
+    plan = run_capture(conductor_command(root, "plan", task_id), cwd=root, timeout=timeout)
+    sys.stdout.write(plan.stdout)
+    sys.stderr.write(plan.stderr)
+    if plan.returncode != 0:
+        raise AdvanceError(f"plan failed for {task_id}")
+    try:
+        summary = json.loads(plan.stdout)
+    except json.JSONDecodeError as exc:
+        raise AdvanceError(f"plan did not return JSON: {exc}") from exc
+    if summary.get("status") != "planned":
+        raise AdvanceError(f"plan status is {summary.get('status')!r}, not 'planned'")
+    run_directory = Path(summary.get("runDirectory") or root / "runs" / str(summary.get("runId")))
+    return run_directory / "decision-sheet.md"
+
+
+def open_sheet(sheet: Path) -> None:
+    if not sheet.is_file():
+        raise AdvanceError(f"decision sheet not found at {sheet}")
+    note(f"decision sheet {sheet}")
+    print()
+    print(sheet.read_text(encoding="utf-8"))
+    if os.environ.get("FOUNDRY_ADVANCE_NO_OPEN"):
+        return
+    opener = "open" if sys.platform == "darwin" else "xdg-open"
+    if shutil.which(opener) is None:
+        return
+    subprocess.run([opener, str(sheet)], check=False, capture_output=True)
+
+
+def main(argv: list[str] | None = None) -> int:
+    argv = list(sys.argv[1:] if argv is None else argv)
+    forbidden = sorted(FORBIDDEN_FLAGS.intersection(argv))
+    if forbidden:
+        print(f"foundry-advance: {', '.join(forbidden)} is never supported; this command plans only", file=sys.stderr)
+        return 1
+    parser = argparse.ArgumentParser(
+        prog="foundry-advance",
+        description="Turn Foundry/SPEC.md into one generic_dag task, then doctor, then plan. Nothing else.",
+    )
+    subcommands = parser.add_subparsers(dest="command", required=True)
+    spec_parser = subcommands.add_parser("spec", help="emit one task from SPEC.md, then doctor and plan it")
+    spec_parser.add_argument("--replace", action="store_true", help="overwrite an existing task file with the same id")
+    spec_parser.add_argument("--foundry", help="path to the Foundry checkout (default: FOUNDRY_ROOT or ../Foundry)")
+    args = parser.parse_args(argv)
+
+    root = Path(__file__).resolve().parents[1]
+    timeout = int(os.environ.get("FOUNDRY_ADVANCE_TIMEOUT", "900"))
+    try:
+        foundry = resolve_foundry(root, args.foundry)
+        task_id = emit_task(root, foundry=foundry, replace=args.replace, timeout=timeout)
+        sheet = check_and_plan(root, task_id, timeout)
+        open_sheet(sheet)
+    except AdvanceError as exc:
+        print(f"foundry-advance: {exc}", file=sys.stderr)
+        return 1
+    note("stop here; live execution, commits, pushes, and merges remain human decisions")
+    return 0
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())

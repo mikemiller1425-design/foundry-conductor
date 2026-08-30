@@ -1,0 +1,159 @@
+{
+  "schemaVersion": 1,
+  "workflow": "generic_dag",
+  "id": "foundry-live-stage-monitor",
+  "sourceRepository": "/Users/macmini/Documents/GitHub/foundry-conductor",
+  "expectedBranch": "main",
+  "expectedHead": "969a798358df54972a00f0f406f8606664ed605a",
+  "permissions": {
+    "push": false,
+    "nasAccess": false,
+    "externalActions": false,
+    "spending": false,
+    "destructive": false,
+    "productionExecution": false
+  },
+  "stages": [
+    {
+      "id": "recon-run-artifacts",
+      "type": "reconnaissance",
+      "role": "general",
+      "dependsOn": [],
+      "timeoutSeconds": 900,
+      "maxAttempts": 2,
+      "prompt": "Read-only. Read-only reconnaissance of the foundry-conductor repository for the live stage monitor described in SPEC.md. Do not modify any file. Establish, from the repository as it exists on disk: (1) the layout of the runs/ directory and how run directories are named so that the latest directory matching *-<task>-* can be selected by mtime; (2) the exact shape of summary.json, including the status values planned/running/complete/failed/blocked, the acceptedStages field, the stage order field, the sourceUnchanged flag, and how errors name a stage; (3) the record shape of events.jsonl, specifically which records indicate a stage started; (4) where stage order lives in manifest.json and plan.json when summary.json has no order; (5) whether decision-sheet.md is written per run and its path; (6) the existing conventions for a local read-only page in this repo (server entrypoints, static asset locations, test layout, package/build tooling) so the monitor follows them rather than introducing a new stack. Record concrete relative paths and field names, not guesses; where a field is absent, say so explicitly instead of inventing one. Print only one JSON object with the keys status, handoffSha256, workStarted, summary, findings, and requiresHuman. Copy handoffSha256 exactly from the handoff. Set workStarted to true. Print only one JSON object with keys status, handoffSha256, workStarted, summary, findings, requiresHuman. Copy handoffSha256 from the handoff. status pass. findings []. requiresHuman false. workStarted true.",
+      "maxTurns": 25
+    },
+    {
+      "id": "implement-run-reader",
+      "type": "implementation",
+      "role": "general",
+      "dependsOn": [
+        "recon-run-artifacts"
+      ],
+      "timeoutSeconds": 2400,
+      "maxAttempts": 3,
+      "allowedPaths": [
+        "tools/monitor/run_reader.py",
+        "tools/monitor/__init__.py",
+        "tests/monitor/test_run_reader.py"
+      ],
+      "prompt": "Implement the read-only run reader for the live stage monitor described in SPEC.md, using the paths and field names established by the reconnaissance handoff. The reader selects the latest directory under runs/ matching *-<task>-* by mtime, and reads summary.json, events.jsonl, decision-sheet.md, and manifest.json/plan.json when present. Stage order comes from summary.json when it carries an order, otherwise from manifest.json or plan.json. Apply exactly the mapping rules in SPEC.md: a stage in order but not in acceptedStages and with no error is queued, or running if events say it started; a stage in acceptedStages is accepted; when status is failed and the error names a stage, that stage is failed and every later stage in order is skipped; when there is no live run the result is an empty board with waiting for run. If files are missing, report waiting for run and do not invent stages. Expose run id, status, live flag, sourceUnchanged, the run directory path, the decision-sheet.md path, and per-stage id, role if known, state, last update time, and the short error text from summary or events rather than a stack dump. Access to runs/ is strictly read-only: open no file for writing outside an optional deletable local .monitor-cache, and spawn no subprocess to any model. Write unit tests covering each mapping rule and the missing-files case. Confine all edits to the allowed paths. Print only one JSON object with the keys status, handoffSha256, workStarted, summary, findings, and requiresHuman. Copy handoffSha256 exactly from the handoff. Set workStarted to true.",
+      "maxTurns": 25
+    },
+    {
+      "id": "implement-monitor-page",
+      "type": "implementation",
+      "role": "general",
+      "dependsOn": [
+        "implement-run-reader"
+      ],
+      "timeoutSeconds": 2400,
+      "maxAttempts": 3,
+      "allowedPaths": [
+        "tools/monitor/server.py",
+        "tools/monitor/static/index.html",
+        "tools/monitor/static/monitor.css",
+        "tools/monitor/static/monitor.js",
+        "tests/monitor/test_server.py"
+      ],
+      "prompt": "Implement the single local read-only page and its serving endpoint for the live stage monitor described in SPEC.md, on top of the run reader from the previous stage. The page has no login. Its header shows run id, status, live true/false, and sourceUnchanged. Below the header is a row of stage boxes in order; each box shows stage id, role if known, state from queued, running, accepted, failed, or skipped, and last update time. A failed box shows the short error text, never a stack dump. The footer shows the path to the run directory and a link that opens decision-sheet.md. The page refreshes every 2 seconds and switches to the newer run folder when the latest run folder changes; with no run it renders an empty board reading waiting for run. The page is a TV: it must not start runs, invoke Claude, Cursor, Codex, or Grok, wrap or replace foundryctl, write into the live Foundry checkout, push, merge, label, or contact Make, and must not poll GitHub or surface model transcripts as the primary UI. Serve read-only HTTP only; the only permitted write is an optional deletable local .monitor-cache. Do not add controls for starting runs from the browser, Make labels, a Notion board, or an Agent City map. Write tests for the endpoint covering the populated run, the failed run, and the waiting-for-run case. Confine all edits to the allowed paths. Print only one JSON object with the keys status, handoffSha256, workStarted, summary, findings, and requiresHuman. Copy handoffSha256 exactly from the handoff. Set workStarted to true.",
+      "maxTurns": 25
+    },
+    {
+      "id": "test-monitor",
+      "type": "test",
+      "dependsOn": [
+        "implement-monitor-page"
+      ],
+      "timeoutSeconds": 1800,
+      "maxAttempts": 2,
+      "command": [
+        "python",
+        "-m",
+        "pytest",
+        "tests/monitor",
+        "-q"
+      ],
+      "allowedCommands": [
+        [
+          "python",
+          "-m",
+          "pytest",
+          "tests/monitor",
+          "-q"
+        ]
+      ],
+      "role": "general"
+    },
+    {
+      "id": "review-monitor",
+      "type": "review",
+      "role": "governance",
+      "dependsOn": [
+        "test-monitor"
+      ],
+      "timeoutSeconds": 1800,
+      "maxAttempts": 2,
+      "prompt": "Review the live stage monitor implementation against SPEC.md without modifying any file. Verify the mapping rules exactly: queued versus running from events, accepted from acceptedStages, failed for the stage named by the error with all later stages skipped, and the empty board with waiting for run when there is no live run. Verify that stage order comes from summary.json when present and otherwise from manifest.json or plan.json, and that no stage is invented when files are missing. Verify the header, stage boxes, short error text instead of a stack dump, footer path and decision-sheet.md link, the 2 second refresh, and switching to a newer latest run folder. Verify each invariant holds: filesystem access to runs/ is read-only, no subprocess is spawned to any model, and no write occurs except an optional deletable local .monitor-cache. Confirm the non-goals are respected: nothing starts runs, wraps or replaces foundryctl, writes into the live Foundry checkout, pushes, merges, labels, talks to Make, polls GitHub, or makes model transcripts the primary UI, and nothing out of scope for this PR was added. Check the acceptance cases are covered by tests: a planned run showing all stages queued with sourceUnchanged true, a run accepting all three stages in order ending complete, a run where Claude is accepted, Cursor failed, and Codex skipped, and the page working while Make is off. Report each defect with its file, line, and the specific SPEC.md rule it violates. Print only one JSON object with the keys status, handoffSha256, workStarted, summary, findings, and requiresHuman. Copy handoffSha256 exactly from the handoff. Set workStarted to true.",
+      "maxTurns": 25
+    },
+    {
+      "id": "repair-monitor",
+      "type": "repair",
+      "role": "general",
+      "dependsOn": [
+        "review-monitor"
+      ],
+      "timeoutSeconds": 2400,
+      "maxAttempts": 3,
+      "allowedPaths": [
+        "tools/monitor/run_reader.py",
+        "tools/monitor/server.py",
+        "tools/monitor/static/index.html",
+        "tools/monitor/static/monitor.css",
+        "tools/monitor/static/monitor.js",
+        "tests/monitor/test_run_reader.py",
+        "tests/monitor/test_server.py"
+      ],
+      "prompt": "Repair the defects reported by the review stage in the live stage monitor. Fix only the reported defects and the tests that cover them; do not add features, do not widen scope beyond SPEC.md, and do not add anything listed as a non-goal or as out of scope for this PR. Every fix must keep the invariants intact: read-only filesystem access to runs/, no subprocess to any model, and no write except an optional deletable local .monitor-cache. Preserve the mapping rules exactly as SPEC.md states them, including later stages becoming skipped after a failed stage and waiting for run when there is no live run. If a reported defect is not in fact a defect, leave the code unchanged and explain why in findings. Confine all edits to the allowed paths. Print only one JSON object with the keys status, handoffSha256, workStarted, summary, findings, and requiresHuman. Copy handoffSha256 exactly from the handoff. Set workStarted to true.",
+      "maxTurns": 25
+    },
+    {
+      "id": "test-monitor-final",
+      "type": "test",
+      "dependsOn": [
+        "repair-monitor"
+      ],
+      "timeoutSeconds": 1800,
+      "maxAttempts": 2,
+      "command": [
+        "python",
+        "-m",
+        "pytest",
+        "tests/monitor",
+        "-q"
+      ],
+      "allowedCommands": [
+        [
+          "python",
+          "-m",
+          "pytest",
+          "tests/monitor",
+          "-q"
+        ]
+      ],
+      "role": "general"
+    },
+    {
+      "id": "human-acceptance-gate",
+      "type": "human_gate",
+      "dependsOn": [
+        "test-monitor-final"
+      ],
+      "timeoutSeconds": 3600,
+      "maxAttempts": 1,
+      "role": "general"
+    }
+  ]
+}
