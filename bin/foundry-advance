@@ -69,6 +69,20 @@ class AdvanceError(RuntimeError):
     pass
 
 
+def spec_source_token(spec_text: str) -> str:
+    for raw in spec_text.splitlines():
+        line = raw.strip()
+        if not line.lower().startswith("source:"):
+            continue
+        token = line.split(":", 1)[1].strip().lower()
+        if token in {"conductor", "foundry-conductor"}:
+            return "conductor"
+        if token == "foundry":
+            return "foundry"
+        raise AdvanceError(f"invalid Source token {token!r}")
+    return "foundry"
+
+
 def note(message: str) -> None:
     print(f"foundry-advance: {message}")
 
@@ -202,18 +216,23 @@ def validate_manifest(value: dict[str, Any], *, source: str, branch: str, head: 
 
 def emit_task(root: Path, *, foundry: Path, replace: bool, timeout: int) -> str:
     spec = foundry / "SPEC.md"
-    if not spec.read_text(encoding="utf-8").strip():
+    spec_text = spec.read_text(encoding="utf-8")
+    if not spec_text.strip():
         raise AdvanceError(f"{spec} is empty")
-    branch = git_value(foundry, "rev-parse", "--abbrev-ref", "HEAD")
-    head = git_value(foundry, "rev-parse", "HEAD")
+    token = spec_source_token(spec_text)
+    pin = root if token == "conductor" else foundry
+    branch = git_value(pin, "rev-parse", "--abbrev-ref", "HEAD")
+    head = git_value(pin, "rev-parse", "HEAD")
+    source = str(pin)
     note(f"SPEC {spec}")
+    note(f"source {token} {source}")
     note(f"baseline {branch} {head}")
 
     claude = os.environ.get("CLAUDE_BIN", "claude")
     if shutil.which(claude) is None and not Path(claude).is_file():
         raise AdvanceError(f"Claude CLI not found: {claude}")
 
-    prompt = PROMPT.replace("__SOURCE__", str(foundry)).replace("__BRANCH__", branch).replace("__HEAD__", head)
+    prompt = PROMPT.replace("__SOURCE__", source).replace("__BRANCH__", branch).replace("__HEAD__", head)
     scratch = Path(tempfile.mkdtemp(prefix="foundry-advance-"))
     try:
         shutil.copyfile(spec, scratch / "SPEC.md")
@@ -225,7 +244,7 @@ def emit_task(root: Path, *, foundry: Path, replace: bool, timeout: int) -> str:
         raise AdvanceError(f"Claude CLI exited {result.returncode}: {result.stderr.strip() or result.stdout.strip()}")
 
     manifest = parse_only_object(result.stdout)
-    task_id = validate_manifest(manifest, source=str(foundry), branch=branch, head=head)
+    task_id = validate_manifest(manifest, source=source, branch=branch, head=head)
     target = root / "tasks" / f"{task_id}.json"
     if target.exists() and not replace:
         raise AdvanceError(f"{target} already exists; rerun with --replace to overwrite it")

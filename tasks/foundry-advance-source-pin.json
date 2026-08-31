@@ -1,0 +1,99 @@
+{
+  "schemaVersion": 1,
+  "workflow": "generic_dag",
+  "id": "foundry-advance-source-pin",
+  "sourceRepository": "/Users/macmini/Documents/GitHub/foundry-conductor",
+  "expectedBranch": "main",
+  "expectedHead": "40c4e7ea0a9a3fe855c23dd7cff546415b82ef23",
+  "permissions": {
+    "push": false,
+    "nasAccess": false,
+    "externalActions": false,
+    "spending": false,
+    "destructive": false,
+    "productionExecution": false
+  },
+  "stages": [
+    {
+      "id": "recon-source-pin",
+      "type": "reconnaissance",
+      "role": "backend",
+      "dependsOn": [],
+      "timeoutSeconds": 900,
+      "maxAttempts": 2,
+      "prompt": "Read foundry-advance and bin/foundry-advance only. Map exactly how sourceRepository, expectedBranch, and expectedHead are currently derived (today they are always pinned to Foundry), where SPEC.md is read, where the manifest is written, and where doctor and plan are invoked after a write. Note the existing role/provider validation so it can be left untouched, and confirm no --live path is involved. Do not modify any file. Print only one JSON object with the keys status, handoffSha256, workStarted, summary, findings, and requiresHuman. Copy handoffSha256 exactly from the handoff. Set workStarted to true."
+    },
+    {
+      "id": "implement-source-pin",
+      "type": "implementation",
+      "role": "backend",
+      "dependsOn": [
+        "recon-source-pin"
+      ],
+      "timeoutSeconds": 1800,
+      "maxAttempts": 3,
+      "allowedPaths": [
+        "foundry-advance",
+        "bin/foundry-advance"
+      ],
+      "prompt": "Implement the SPEC.md source pin rule in foundry-advance and bin/foundry-advance only. Parse SPEC.md for a Source line: 'Source: conductor' or 'Source: foundry-conductor' pins the conductor checkout (this repo root), reading branch and HEAD from that git checkout; 'Source: foundry' keeps the current Foundry pin behavior; a missing Source line defaults to the Foundry pin; an invalid source token must error and write nothing. Doctor and plan must still run after a valid write, and no --live behavior may be added. Do not add a Makefile, a TV target, a foundryctl rewrite, or a second wrapper, and do not change the role/provider validation already on main. Print only one JSON object with the keys status, handoffSha256, workStarted, summary, findings, and requiresHuman. Copy handoffSha256 exactly from the handoff. Set workStarted to true."
+    },
+    {
+      "id": "review-source-pin",
+      "type": "review",
+      "role": "backend",
+      "dependsOn": [
+        "implement-source-pin"
+      ],
+      "timeoutSeconds": 1200,
+      "maxAttempts": 2,
+      "prompt": "Review the changes to foundry-advance and bin/foundry-advance against SPEC.md. Verify all four pass conditions: Source: conductor pins the conductor root with branch and HEAD from that git checkout; Source: foundry keeps current Foundry pin behavior; a missing Source line defaults to the Foundry pin; an invalid source token errors and writes nothing (no partial manifest left behind). Confirm 'Source: foundry-conductor' is accepted as an alias for conductor, that doctor and plan still run after a valid write, that no --live path was added, that no files outside the two allowed paths changed, and that role/provider validation already on main is unchanged. Report any deviation as a finding. Print only one JSON object with the keys status, handoffSha256, workStarted, summary, findings, and requiresHuman. Copy handoffSha256 exactly from the handoff. Set workStarted to true."
+    },
+    {
+      "id": "repair-source-pin",
+      "type": "repair",
+      "role": "backend",
+      "dependsOn": [
+        "review-source-pin"
+      ],
+      "timeoutSeconds": 1800,
+      "maxAttempts": 3,
+      "allowedPaths": [
+        "foundry-advance",
+        "bin/foundry-advance"
+      ],
+      "prompt": "Fix only the findings raised by the review stage for the SPEC.md source pin work, editing foundry-advance and bin/foundry-advance only. Preserve every SPEC.md pass condition: Source: conductor pins the conductor root with branch and HEAD from that checkout, Source: foundry keeps the Foundry pin, a missing Source line defaults to Foundry, and an invalid source token errors while writing nothing. Doctor and plan must still run after a valid write, and no --live path may be introduced. Do not add a Makefile, TV target, foundryctl rewrite, or second wrapper, and do not touch role/provider validation. Make no changes beyond the reported findings. Print only one JSON object with the keys status, handoffSha256, workStarted, summary, findings, and requiresHuman. Copy handoffSha256 exactly from the handoff. Set workStarted to true."
+    },
+    {
+      "id": "test-source-pin",
+      "type": "test",
+      "dependsOn": [
+        "repair-source-pin"
+      ],
+      "timeoutSeconds": 1200,
+      "maxAttempts": 2,
+      "command": [
+        "bash",
+        "-lc",
+        "./foundry-advance --help"
+      ],
+      "allowedCommands": [
+        [
+          "bash",
+          "-lc",
+          "./foundry-advance --help"
+        ],
+        [
+          "bash",
+          "-lc",
+          "bash -n foundry-advance"
+        ],
+        [
+          "bash",
+          "-lc",
+          "bash -n bin/foundry-advance"
+        ]
+      ]
+    }
+  ]
+}
