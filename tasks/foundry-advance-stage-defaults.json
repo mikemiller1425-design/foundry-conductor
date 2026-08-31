@@ -1,0 +1,76 @@
+{
+  "schemaVersion": 1,
+  "workflow": "generic_dag",
+  "id": "foundry-advance-stage-defaults",
+  "sourceRepository": "/Users/macmini/Documents/GitHub/foundry-conductor",
+  "expectedBranch": "main",
+  "expectedHead": "8f2fb2b1c2d61ff343645032353dc540c8732aae",
+  "permissions": {
+    "push": false,
+    "nasAccess": false,
+    "externalActions": false,
+    "spending": false,
+    "destructive": false,
+    "productionExecution": false
+  },
+  "stages": [
+    {
+      "id": "recon-stage-normalization",
+      "type": "reconnaissance",
+      "role": "general",
+      "dependsOn": [],
+      "timeoutSeconds": 900,
+      "maxAttempts": 2,
+      "prompt": "Read only foundry-advance and bin/foundry-advance in the source repository. Map exactly where the task JSON stages are assembled before write, and report: (1) where maxTurns is currently set or omitted for reconnaissance/implementation/review/repair stages; (2) where roles are chosen for implementation and repair stages, and where LEGAL_ROLE and the cursor roles frontend/contract/contract_dependency are defined; (3) where test stage command and allowedCommands values are produced, and whether any command can begin with 'python'; (4) where repair and human_gate stages can be emitted, and how SPEC.md text is already parsed so an 'Include: repair' or 'Include: human_gate' opt-in could be detected; (5) where the existing 'Source:' pin check and the role/provider rejection logic live, so they are preserved untouched. Do not modify any file. Print only one JSON object with the keys status, handoffSha256, workStarted, summary, findings, and requiresHuman. Copy handoffSha256 exactly from the handoff. Set workStarted to true."
+    },
+    {
+      "id": "implement-stage-defaults",
+      "type": "implementation",
+      "role": "general",
+      "dependsOn": [
+        "recon-stage-normalization"
+      ],
+      "timeoutSeconds": 2400,
+      "maxAttempts": 3,
+      "allowedPaths": [
+        "foundry-advance",
+        "bin/foundry-advance"
+      ],
+      "prompt": "Implement stage normalization in foundry-advance so that stages are normalized immediately before the task JSON is written. Requirements: (1) every reconnaissance, implementation, review, and repair stage gets maxTurns 25 when maxTurns is missing or below 25, leaving values above 25 unchanged; (2) implementation and repair stage roles become 'general' unless the existing role is already a LEGAL_ROLE that is not a cursor role, so the cursor roles frontend, contract, and contract_dependency are never used on write stages; (3) any test stage command starting with 'python' becomes 'python3', applying the identical rewrite to the matching entries in allowedCommands so the command still appears verbatim there; (4) repair and human_gate stages are not emitted unless SPEC.md contains the literal text 'Include: repair' or 'Include: human_gate' respectively. Do not add a --live flag, a Make target, TV output, or any foundryctl rewrite. Keep the existing 'Source:' pin check and the existing role/provider rejection behavior intact. Edit only foundry-advance and bin/foundry-advance. Print only one JSON object with the keys status, handoffSha256, workStarted, summary, findings, and requiresHuman. Copy handoffSha256 exactly from the handoff. Set workStarted to true."
+    },
+    {
+      "id": "test-generated-ticket-defaults",
+      "type": "test",
+      "dependsOn": [
+        "implement-stage-defaults"
+      ],
+      "timeoutSeconds": 1200,
+      "maxAttempts": 2,
+      "command": [
+        "python3",
+        "-m",
+        "pytest",
+        "-q"
+      ],
+      "allowedCommands": [
+        [
+          "python3",
+          "-m",
+          "pytest",
+          "-q"
+        ]
+      ]
+    },
+    {
+      "id": "review-stage-defaults",
+      "type": "review",
+      "role": "general",
+      "dependsOn": [
+        "test-generated-ticket-defaults"
+      ],
+      "timeoutSeconds": 1200,
+      "maxAttempts": 2,
+      "prompt": "Review the changes to foundry-advance and bin/foundry-advance against the acceptance criteria: a generated ticket always has maxTurns >= 25 on reconnaissance, implementation, review, and repair stages; write stages (implementation and repair) use role general unless an existing non-cursor LEGAL_ROLE was set, and never use the cursor roles frontend, contract, or contract_dependency; test commands beginning with 'python' are rewritten to 'python3' in both command and allowedCommands so command still appears verbatim in allowedCommands; a default ticket whose SPEC.md lacks 'Include: repair' and 'Include: human_gate' emits no repair and no human_gate stage. Confirm no --live flag, Make target, TV output, or foundryctl rewrite was added, and that the existing 'Source:' pin check and role/provider rejection are unchanged. Report any deviation as a finding. Do not modify any file. Print only one JSON object with the keys status, handoffSha256, workStarted, summary, findings, and requiresHuman. Copy handoffSha256 exactly from the handoff. Set workStarted to true."
+    }
+  ]
+}

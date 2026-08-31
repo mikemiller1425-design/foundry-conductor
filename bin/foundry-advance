@@ -214,6 +214,40 @@ def validate_manifest(value: dict[str, Any], *, source: str, branch: str, head: 
     return task_id
 
 
+
+def normalize_stages(manifest: dict) -> None:
+    include = set()
+    # Include: lines live in the copied SPEC only at emit time; ticket itself
+    # should not grow repair/human_gate unless already present and wanted.
+    cursor_roles = CURSOR_ROLES
+    for stage in manifest.get("stages", []):
+        if not isinstance(stage, dict):
+            continue
+        kind = stage.get("type")
+        if kind in AGENT_STAGE_TYPES:
+            turns = stage.get("maxTurns")
+            if not isinstance(turns, int) or isinstance(turns, bool) or turns < 25:
+                stage["maxTurns"] = 25
+        if kind in WRITE_STAGE_TYPES:
+            role = stage.get("role")
+            if role not in LEGAL_ROLES or role in cursor_roles:
+                stage["role"] = "general"
+        if kind == "test":
+            cmd = stage.get("command")
+            if isinstance(cmd, list) and cmd and cmd[0] == "python":
+                cmd[0] = "python3"
+            allowed = stage.get("allowedCommands")
+            if isinstance(allowed, list):
+                for item in allowed:
+                    if isinstance(item, list) and item and item[0] == "python":
+                        item[0] = "python3"
+    stages = manifest.get("stages")
+    if isinstance(stages, list):
+        manifest["stages"] = [
+            s for s in stages
+            if not (isinstance(s, dict) and s.get("type") in {"repair", "human_gate"})
+        ]
+
 def emit_task(root: Path, *, foundry: Path, replace: bool, timeout: int) -> str:
     spec = foundry / "SPEC.md"
     spec_text = spec.read_text(encoding="utf-8")
@@ -244,6 +278,7 @@ def emit_task(root: Path, *, foundry: Path, replace: bool, timeout: int) -> str:
         raise AdvanceError(f"Claude CLI exited {result.returncode}: {result.stderr.strip() or result.stdout.strip()}")
 
     manifest = parse_only_object(result.stdout)
+    normalize_stages(manifest)
     task_id = validate_manifest(manifest, source=source, branch=branch, head=head)
     target = root / "tasks" / f"{task_id}.json"
     if target.exists() and not replace:
