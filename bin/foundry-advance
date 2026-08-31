@@ -20,6 +20,12 @@ AGENT_STAGE_TYPES = {"reconnaissance", "implementation", "review", "repair"}
 STAGE_TYPES = AGENT_STAGE_TYPES | {"workspace_seed", "test", "commit", "human_gate"}
 WRITE_STAGE_TYPES = {"implementation", "repair"}
 CURSOR_ROLES = {"frontend", "contract", "contract_dependency"}
+LEGAL_ROLES = {
+    "backend", "general", "implementation",
+    "frontend", "contract", "contract_dependency",
+    "governance", "security", "review", "integration",
+}
+LEGAL_PROVIDERS = {"claude", "cursor", "codex"}
 
 PROMPT = """You are producing one Foundry Conductor task manifest.
 
@@ -168,6 +174,11 @@ def validate_manifest(value: dict[str, Any], *, source: str, branch: str, head: 
         if stage["type"] in AGENT_STAGE_TYPES:
             if not isinstance(stage.get("role"), str) or not stage["role"]:
                 raise AdvanceError(f"stage {stage_id} requires a role")
+            if stage["role"] not in LEGAL_ROLES:
+                raise AdvanceError(f"stage {stage_id} role {stage['role']!r} is illegal")
+            provider = stage.get("provider")
+            if provider is not None and provider not in LEGAL_PROVIDERS:
+                raise AdvanceError(f"stage {stage_id} provider {provider!r} is illegal")
             if not isinstance(stage.get("prompt"), str) or not stage["prompt"]:
                 raise AdvanceError(f"stage {stage_id} requires a prompt")
         if stage["type"] in WRITE_STAGE_TYPES:
