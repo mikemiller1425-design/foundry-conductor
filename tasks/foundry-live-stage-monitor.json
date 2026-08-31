@@ -3,8 +3,8 @@
   "workflow": "generic_dag",
   "id": "foundry-live-stage-monitor",
   "sourceRepository": "/Users/macmini/Documents/GitHub/foundry-conductor",
-  "expectedBranch": "main",
-  "expectedHead": "969a798358df54972a00f0f406f8606664ed605a",
+  "expectedBranch": "foundry-advance-and-monitor",
+  "expectedHead": "7da47cc8577d0d49d313ffd9f9733d407eef9134",
   "permissions": {
     "push": false,
     "nasAccess": false,
@@ -69,7 +69,7 @@
       "timeoutSeconds": 1800,
       "maxAttempts": 2,
       "command": [
-        "python",
+        "python3",
         "-m",
         "pytest",
         "tests/monitor",
@@ -77,7 +77,7 @@
       ],
       "allowedCommands": [
         [
-          "python",
+          "python3",
           "-m",
           "pytest",
           "tests/monitor",
@@ -128,7 +128,7 @@
       "timeoutSeconds": 1800,
       "maxAttempts": 2,
       "command": [
-        "python",
+        "python3",
         "-m",
         "pytest",
         "tests/monitor",
@@ -136,7 +136,7 @@
       ],
       "allowedCommands": [
         [
-          "python",
+          "python3",
           "-m",
           "pytest",
           "tests/monitor",
