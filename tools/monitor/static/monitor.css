@@ -1,0 +1,183 @@
+/* Wall-display styling for the live stage monitor: dark, large, and legible
+   from across a room.  No remote fonts or images, so the page works offline. */
+
+:root {
+  --ink: #e8ecf1;
+  --ink-dim: #93a1b1;
+  --page: #0d1117;
+  --panel: #161b22;
+  --edge: #2b3542;
+  --queued: #6e7d8f;
+  --running: #3b8ee0;
+  --accepted: #2ea043;
+  --failed: #e5534b;
+  --skipped: #55606e;
+}
+
+* {
+  box-sizing: border-box;
+}
+
+body {
+  margin: 0;
+  min-height: 100vh;
+  display: flex;
+  flex-direction: column;
+  gap: 1.5rem;
+  padding: 1.5rem;
+  background: var(--page);
+  color: var(--ink);
+  font: 16px/1.5 ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+}
+
+body.is-stale {
+  /* The last good board stays on screen, dimmed, until the next good read. */
+  opacity: 0.55;
+  transition: opacity 200ms ease-in;
+}
+
+/* --- header --------------------------------------------------------- */
+
+.header {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: baseline;
+  justify-content: space-between;
+  gap: 1rem 2rem;
+  padding-bottom: 1rem;
+  border-bottom: 1px solid var(--edge);
+}
+
+.header__run {
+  margin: 0;
+  font-size: 1.9rem;
+  font-weight: 600;
+  letter-spacing: 0.01em;
+  overflow-wrap: anywhere;
+}
+
+.facts {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 2rem;
+  margin: 0;
+}
+
+.fact__name {
+  font-size: 0.8rem;
+  text-transform: uppercase;
+  letter-spacing: 0.08em;
+  color: var(--ink-dim);
+}
+
+.fact__value {
+  margin: 0.15rem 0 0;
+  font-size: 1.3rem;
+}
+
+/* --- board ---------------------------------------------------------- */
+
+.main {
+  flex: 1;
+}
+
+.board {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 1rem;
+  margin: 0;
+  padding: 0;
+  list-style: none;
+}
+
+.stage {
+  display: flex;
+  flex-direction: column;
+  gap: 0.35rem;
+  flex: 1 1 15rem;
+  max-width: 22rem;
+  padding: 1rem;
+  background: var(--panel);
+  border: 1px solid var(--edge);
+  border-top: 4px solid var(--queued);
+  border-radius: 6px;
+}
+
+.stage--queued { border-top-color: var(--queued); }
+.stage--running { border-top-color: var(--running); }
+.stage--accepted { border-top-color: var(--accepted); }
+.stage--failed { border-top-color: var(--failed); }
+.stage--skipped { border-top-color: var(--skipped); opacity: 0.6; }
+
+.stage__id {
+  margin: 0;
+  font-size: 1.1rem;
+  font-weight: 600;
+  overflow-wrap: anywhere;
+}
+
+.stage__role,
+.stage__update {
+  margin: 0;
+  font-size: 0.85rem;
+  color: var(--ink-dim);
+}
+
+.stage__state {
+  margin: 0.2rem 0 0;
+  font-size: 1rem;
+  font-weight: 600;
+  letter-spacing: 0.06em;
+  text-transform: uppercase;
+}
+
+.stage--running .stage__state { color: var(--running); }
+.stage--accepted .stage__state { color: var(--accepted); }
+.stage--failed .stage__state { color: var(--failed); }
+.stage--skipped .stage__state { color: var(--skipped); }
+
+.stage__error {
+  margin: 0.3rem 0 0;
+  padding-top: 0.5rem;
+  border-top: 1px solid var(--edge);
+  font-size: 0.85rem;
+  color: var(--failed);
+  overflow-wrap: anywhere;
+}
+
+.empty {
+  margin: 3rem 0;
+  text-align: center;
+  font-size: 1.4rem;
+  color: var(--ink-dim);
+}
+
+.empty[hidden] {
+  display: none;
+}
+
+/* --- footer --------------------------------------------------------- */
+
+.footer {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: baseline;
+  justify-content: space-between;
+  gap: 0.5rem 2rem;
+  padding-top: 1rem;
+  border-top: 1px solid var(--edge);
+  font-size: 0.85rem;
+  color: var(--ink-dim);
+}
+
+.footer__path {
+  overflow-wrap: anywhere;
+}
+
+.footer__sheet {
+  color: var(--running);
+}
+
+.footer__sheet[hidden] {
+  display: none;
+}

@@ -1,0 +1,45 @@
+<!DOCTYPE html>
+<!--
+  The one page of the live stage monitor.  It is a TV: no login, no controls,
+  no form, no way to start a run.  Everything it shows comes from /api/board,
+  and every asset is local so the display works offline.
+-->
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>live stage monitor</title>
+    <link rel="stylesheet" href="/monitor.css" />
+  </head>
+  <body>
+    <header class="header">
+      <h1 class="header__run" id="run-id">waiting for run</h1>
+      <dl class="facts">
+        <div class="fact">
+          <dt class="fact__name">status</dt>
+          <dd class="fact__value" id="status">&mdash;</dd>
+        </div>
+        <div class="fact">
+          <dt class="fact__name">live</dt>
+          <dd class="fact__value" id="live">&mdash;</dd>
+        </div>
+        <div class="fact">
+          <dt class="fact__name">sourceUnchanged</dt>
+          <dd class="fact__value" id="source-unchanged">&mdash;</dd>
+        </div>
+      </dl>
+    </header>
+
+    <main class="main">
+      <ol class="board" id="board"></ol>
+      <p class="empty" id="empty">waiting for run</p>
+    </main>
+
+    <footer class="footer">
+      <span class="footer__path" id="run-directory">&mdash;</span>
+      <a class="footer__sheet" id="decision-sheet" href="/decision-sheet.md" hidden>decision-sheet.md</a>
+    </footer>
+
+    <script src="/monitor.js"></script>
+  </body>
+</html>

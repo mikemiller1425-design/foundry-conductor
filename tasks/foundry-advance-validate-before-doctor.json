@@ -1,0 +1,98 @@
+{
+  "schemaVersion": 1,
+  "workflow": "generic_dag",
+  "id": "foundry-advance-validate-before-doctor",
+  "sourceRepository": "/Users/macmini/Documents/GitHub/foundry-conductor",
+  "expectedBranch": "foundry-advance-and-monitor",
+  "expectedHead": "7bf89f4645cc385a5976be7c63a36ca38110d832",
+  "permissions": {
+    "push": false,
+    "nasAccess": false,
+    "externalActions": false,
+    "spending": false,
+    "destructive": false,
+    "productionExecution": false
+  },
+  "stages": [
+    {
+      "id": "recon-advance-validation",
+      "type": "reconnaissance",
+      "role": "general",
+      "dependsOn": [],
+      "timeoutSeconds": 900,
+      "maxAttempts": 2,
+      "prompt": "Read foundry-advance and bin/foundry-advance in the repository at /Users/macmini/Documents/GitHub/Foundry on branch creator-foundation-seal at commit 0c3cb233ff6b0d2da669500d672525e70555d148. Do not modify any file. Determine exactly where the script parses the task JSON returned by Claude, where it writes tasks/<id>.json, and where it invokes doctor, so that a validation step can be inserted strictly between parsing and writing. Record: the JSON parsing mechanism in use, the variable or path holding the pending task JSON, the exact write call for tasks/<id>.json, the doctor invocation site, and any existing validation or error-printing helpers and exit-code conventions that new validation must match. Note the allowed role list already present, if any, and how stages are enumerated. Scope is limited to foundry-advance and bin/foundry-advance; do not propose --live, Make, TV, a foundryctl rewrite, or a second wrapper. Print only one JSON object with the keys status, handoffSha256, workStarted, summary, findings, and requiresHuman. Copy handoffSha256 exactly from the handoff. Set workStarted to true. Print no prose, no markdown, and no code fence.",
+      "allowedPaths": [
+        "foundry-advance",
+        "bin/foundry-advance"
+      ]
+    },
+    {
+      "id": "implement-stage-validation",
+      "type": "implementation",
+      "role": "backend",
+      "dependsOn": [
+        "recon-advance-validation"
+      ],
+      "timeoutSeconds": 2400,
+      "maxAttempts": 3,
+      "prompt": "Using the reconnaissance findings, edit only foundry-advance and bin/foundry-advance so that after Claude returns a task JSON, foundry-advance rejects the task before writing tasks/<id>.json. Implement these rules: (1) every stage role must be one of backend, general, implementation, frontend, contract, contract_dependency, governance, security, review, integration, and any other role is rejected; (2) an illegal provider is rejected; (3) implementation and repair stages must not use the cursor roles frontend, contract, or contract_dependency; (4) write stages (implementation and repair) require a non-empty allowedPaths array of relative paths, and a missing, empty, or absolute-path allowedPaths is rejected; (5) invalid JSON prints an error and writes nothing; (6) rejection prints a clear error identifying the offending stage id and rule, exits non-zero, and leaves no tasks/<id>.json behind; (7) doctor still runs only after a valid file has been written, so no rejected task ever reaches doctor. Match the existing error-printing and exit-code conventions found during reconnaissance. Do not add a --live flag, a Makefile, TV support, a rewrite of foundryctl, or a second wrapper. Do not touch any path outside foundry-advance and bin/foundry-advance. Print only one JSON object with the keys status, handoffSha256, workStarted, summary, findings, and requiresHuman. Copy handoffSha256 exactly from the handoff. Set workStarted to true. Print no prose, no markdown, and no code fence.",
+      "allowedPaths": [
+        "foundry-advance",
+        "bin/foundry-advance"
+      ]
+    },
+    {
+      "id": "review-stage-validation",
+      "type": "review",
+      "role": "review",
+      "dependsOn": [
+        "implement-stage-validation"
+      ],
+      "timeoutSeconds": 1200,
+      "maxAttempts": 2,
+      "prompt": "Review the changes to foundry-advance and bin/foundry-advance without modifying any file. Verify each acceptance criterion from the specification: the role allowlist is exactly backend, general, implementation, frontend, contract, contract_dependency, governance, security, review, integration; implementation and repair stages are rejected when they use the cursor roles frontend, contract, or contract_dependency; write stages are rejected without a non-empty relative allowedPaths; illegal providers are rejected; invalid JSON prints an error and writes nothing; validation runs before tasks/<id>.json is written so a rejected task leaves no file behind; doctor runs only after a valid file is written. Also confirm no out-of-scope work was added: no --live flag, no Make, no TV, no foundryctl rewrite, no second wrapper, and no edits outside the two allowed files. Report each unmet criterion as a separate finding naming the file, the line, and the failing case. Print only one JSON object with the keys status, handoffSha256, workStarted, summary, findings, and requiresHuman. Copy handoffSha256 exactly from the handoff. Set workStarted to true. Print no prose, no markdown, and no code fence."
+    },
+    {
+      "id": "repair-stage-validation",
+      "type": "repair",
+      "role": "backend",
+      "dependsOn": [
+        "review-stage-validation"
+      ],
+      "timeoutSeconds": 1800,
+      "maxAttempts": 3,
+      "prompt": "Address every finding raised by the review of the validate-before-doctor change, editing only foundry-advance and bin/foundry-advance. Fix only what the findings identify, preserving the existing error-printing and exit-code conventions, and re-check that the full acceptance set still holds: the exact role allowlist, cursor roles rejected for implementation and repair stages, write stages requiring non-empty relative allowedPaths, illegal providers rejected, invalid JSON printing an error and writing nothing, validation running before tasks/<id>.json is written, and doctor running only after a valid file is written. If a finding is incorrect or already satisfied, leave the code unchanged and record that in findings with the reason. Do not add a --live flag, a Makefile, TV support, a foundryctl rewrite, or a second wrapper. Print only one JSON object with the keys status, handoffSha256, workStarted, summary, findings, and requiresHuman. Copy handoffSha256 exactly from the handoff. Set workStarted to true. Print no prose, no markdown, and no code fence.",
+      "allowedPaths": [
+        "foundry-advance",
+        "bin/foundry-advance"
+      ]
+    },
+    {
+      "id": "test-advance-validation",
+      "type": "test",
+      "dependsOn": [
+        "repair-stage-validation"
+      ],
+      "timeoutSeconds": 900,
+      "maxAttempts": 2,
+      "command": [
+        "bash",
+        "-n",
+        "foundry-advance"
+      ],
+      "allowedCommands": [
+        [
+          "bash",
+          "-n",
+          "foundry-advance"
+        ],
+        [
+          "bash",
+          "-n",
+          "bin/foundry-advance"
+        ]
+      ]
+    }
+  ]
+}

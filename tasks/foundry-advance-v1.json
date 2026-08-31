@@ -1,0 +1,62 @@
+{
+  "schemaVersion": 1,
+  "workflow": "generic_dag",
+  "id": "foundry-advance-v1",
+  "sourceRepository": "/Users/macmini/Documents/GitHub/foundry-conductor",
+  "expectedBranch": "main",
+  "expectedHead": "969a798358df54972a00f0f406f8606664ed605a",
+  "permissions": {
+    "push": false,
+    "nasAccess": false,
+    "externalActions": false,
+    "spending": false,
+    "destructive": false,
+    "productionExecution": false
+  },
+  "stages": [
+    {
+      "id": "claude-implement",
+      "type": "implementation",
+      "role": "general",
+      "dependsOn": [],
+      "allowedPaths": [
+        "foundry-advance",
+        "bin/foundry-advance"
+      ],
+      "prompt": "Read attachment SPEC-ADVANCE.md first. Implement ONLY that spec. Write ./foundry-advance (and bin/foundry-advance if needed). Command: foundry-advance spec. Reads Foundry/SPEC.md, copies to temp, calls Claude CLI to emit one generic_dag task JSON, writes tasks/<id>.json, refuses overwrite unless --replace, runs foundryctl doctor then plan, opens decision-sheet, exits. FORBIDDEN: --live, push, Make, Cursor, Codex, writing the live Foundry tree. Print only one JSON object with keys status, handoffSha256, workStarted, summary, findings, requiresHuman. Copy handoffSha256 from the handoff. status pass only if the script matches the spec. findings must be []. requiresHuman must be false.",
+      "timeoutSeconds": 1200,
+      "maxAttempts": 1,
+      "maxTurns": 25,
+      "attachments": [
+        {
+          "path": "docs/SPEC-ADVANCE.md",
+          "sha256": "37a37d426d461d9f31008111fe4471b92895476a2b37840899fb82f1d1d59471",
+          "name": "SPEC-ADVANCE.md"
+        }
+      ]
+    },
+    {
+      "id": "cursor-review",
+      "type": "review",
+      "role": "contract",
+      "dependsOn": [
+        "claude-implement"
+      ],
+      "prompt": "Read-only review. Print only one JSON object with keys status, handoffSha256, workStarted, summary, findings, requiresHuman. Copy handoffSha256 from the handoff.",
+      "timeoutSeconds": 300,
+      "maxAttempts": 1
+    },
+    {
+      "id": "codex-review",
+      "type": "review",
+      "role": "governance",
+      "dependsOn": [
+        "claude-implement",
+        "cursor-review"
+      ],
+      "prompt": "Read-only review. Print only one JSON object with keys status, handoffSha256, workStarted, summary, findings, requiresHuman. Copy handoffSha256 from the handoff.",
+      "timeoutSeconds": 300,
+      "maxAttempts": 1
+    }
+  ]
+}
