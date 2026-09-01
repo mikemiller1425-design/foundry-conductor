@@ -116,6 +116,9 @@ def run_command(
             timeout=timeout_seconds,
             check=check,
         )
+    except FileNotFoundError as exc:
+        name = list(argv)[0] if argv else "?"
+        raise ConductorError(f"command not found: {name}") from exc
     except subprocess.TimeoutExpired as exc:
         raise ConductorError(f"command timed out after {timeout_seconds}s: {argv}") from exc
     except subprocess.CalledProcessError as exc:

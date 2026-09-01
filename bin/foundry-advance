@@ -232,6 +232,9 @@ def normalize_stages(manifest: dict) -> None:
             role = stage.get("role")
             if role not in LEGAL_ROLES or role in cursor_roles:
                 stage["role"] = "general"
+        if kind in {"reconnaissance", "review"}:
+            # Claude-first: Cursor only when a later harden re-enables it.
+            stage["role"] = "general"
         if kind == "test":
             cmd = stage.get("command")
             if isinstance(cmd, list) and cmd and cmd[0] == "python":
