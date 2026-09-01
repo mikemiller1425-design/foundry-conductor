@@ -243,10 +243,19 @@ def normalize_stages(manifest: dict) -> None:
                         item[0] = "python3"
     stages = manifest.get("stages")
     if isinstance(stages, list):
-        manifest["stages"] = [
+        dropped = {
+            s.get("id")
+            for s in stages
+            if isinstance(s, dict) and s.get("type") in {"repair", "human_gate"} and isinstance(s.get("id"), str)
+        }
+        kept = [
             s for s in stages
             if not (isinstance(s, dict) and s.get("type") in {"repair", "human_gate"})
         ]
+        for s in kept:
+            if isinstance(s, dict) and isinstance(s.get("dependsOn"), list):
+                s["dependsOn"] = [d for d in s["dependsOn"] if d not in dropped]
+        manifest["stages"] = kept
 
 def emit_task(root: Path, *, foundry: Path, replace: bool, timeout: int) -> str:
     spec = foundry / "SPEC.md"
